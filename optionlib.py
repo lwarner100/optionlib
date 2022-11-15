@@ -88,7 +88,7 @@ class BinomialOption:
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type_ = self.type_, style=self.style, n=self.n, pos='s', qty=self.qty*amount)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type_=self.type_, style=self.style, n=self.n, pos='s', qty=self.qty*amount)
 
 
     def date_to_t(self,date):
@@ -96,10 +96,16 @@ class BinomialOption:
             date = pd.to_datetime(date).date()
         elif isinstance(date,datetime.datetime):
             date = date.date()
+
+        try:
+            import pandas_market_calendars as mcal
+            nyse = mcal.get_calendar('NYSE')
+            days = nyse.schedule(start_date=datetime.date.today(), end_date=date)
+            dt = len(days.index)/252
+        except ImportError:
+            dt = (date - datetime.date.today()).days/365
         
-        dt = date - datetime.date.today()
-        
-        return np.ceil(dt.days)/360
+        return dt
 
     def reset_params(self):
         for param in self.params:
@@ -132,8 +138,9 @@ class BinomialOption:
         return val
 
     def node_eval(self,price,Vu,Vd):
+        intrinsic_value = price - self.k if self.type_ == 'C' else self.k - price
         if self.style == 'A':
-            val = max(self.k - price, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
+            val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
         else:
             val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
         return val
@@ -299,10 +306,16 @@ class BSOption:
             date = pd.to_datetime(date).date()
         elif isinstance(date,datetime.datetime):
             date = date.date()
+
+        try:
+            import pandas_market_calendars as mcal
+            nyse = mcal.get_calendar('NYSE')
+            days = nyse.schedule(start_date=datetime.date.today(), end_date=date)
+            dt = len(days.index)/252
+        except:
+            dt = (date - datetime.date.today()).days/365
         
-        dt = date - datetime.date.today()
-        
-        return np.ceil(dt.days)/365
+        return dt
 
 
     def d1(self):
@@ -668,4 +681,5 @@ class VolSurface:
 
 if __name__=='__main__':
     call = BSOption()
-    call.interactive_plot('vega')
+    put = BSOption(type_='p')
+    call.payoff_plot()
