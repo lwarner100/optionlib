@@ -4,6 +4,7 @@ import datetime
 import numpy as np
 import scipy
 import pandas as pd
+import pandas.tseries.holiday
 
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
@@ -15,7 +16,7 @@ import ipywidgets as widgets
 from IPython.display import clear_output
 
 class BinomialOption:
-    params = ['s','k','t','sigma','r','type_','tree','style']
+    params = ['s','k','t','sigma','r','type','tree','style']
     valid_types = {
         'c':'C',
         'C':'C',
@@ -38,14 +39,7 @@ class BinomialOption:
         'european':'E',
     }
 
-    valid_pos = {
-        'l':'l',
-        'long':'l',
-        's':'s',
-        'short':'s'
-    }
-
-    def __init__(self, s, k, t, sigma, r, type_: str='C', style: str='A', n: int=50, pos: str='l',qty: int = 1):
+    def __init__(self, s, k, t, sigma, r, type: str='C', style: str='A', n: int=50, qty: int = 1):
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -56,19 +50,16 @@ class BinomialOption:
         self.r = r
         self.n = n
         self.qty = qty
+        self.pos = 'long' if qty > 0 else 'short'
 
-        if type_ not in self.valid_types.keys():
-            raise ValueError('`type_` must be \'call\', \'C\', \'put\', or \'P\'')
+        if type not in self.valid_types.keys():
+            raise ValueError('`type` must be \'call\', \'C\', \'put\', or \'P\'')
         else:
-            self.type_ = self.valid_types.get(type_)
+            self.type = self.valid_types.get(type)
         if style not in self.valid_styles.keys():
             raise ValueError('`style` must be \'American\', \'A\', \'European\', or \'E\'')
         else:
             self.style = self.valid_styles.get(style)
-        if pos.lower() not in self.valid_pos.keys():
-            raise ValueError('`pos` must be \'l\', \'long\', \'s\', or \'short\'')
-        else:
-            self.pos = self.valid_pos.get(pos.lower())
 
         self.get_secondary_params()
 
@@ -76,10 +67,10 @@ class BinomialOption:
 
 
     def __repr__(self):
-        return f'BinomialOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type_}, style={self.style})'
+        return f'BinomialOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
 
     def __neg__(self):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type_ = self.type_, style=self.style, n=self.n, pos='s',qty=self.qty)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -88,24 +79,22 @@ class BinomialOption:
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type_=self.type_, style=self.style, n=self.n, pos='s', qty=self.qty*amount)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
 
 
-    def date_to_t(self,date):
+    @staticmethod
+    def date_to_t(date):
         if isinstance(date,str):
             date = pd.to_datetime(date).date()
         elif isinstance(date,datetime.datetime):
             date = date.date()
 
-        try:
-            import pandas_market_calendars as mcal
-            nyse = mcal.get_calendar('NYSE')
-            days = nyse.schedule(start_date=datetime.date.today(), end_date=date)
-            dt = len(days.index)/252
-        except ImportError:
-            dt = (date - datetime.date.today()).days/365
+        today = pd.Timestamp.today()
+        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+        holidays = us_holidays.holidays(start=today, end=date)
+        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
         
-        return dt
+        return dt/252
 
     def reset_params(self):
         for param in self.params:
@@ -134,11 +123,11 @@ class BinomialOption:
         return summary_df
 
     def evaluate(self,price):
-        val = max(price-self.k,0) if self.type_ == 'C' else max(self.k-price,0)
+        val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
         return val
 
     def node_eval(self,price,Vu,Vd):
-        intrinsic_value = price - self.k if self.type_ == 'C' else self.k - price
+        intrinsic_value = price - self.k if self.type == 'C' else self.k - price
         if self.style == 'A':
             val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
         else:
@@ -190,9 +179,13 @@ class BinomialOption:
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def price(self):
+        return self.value()
+
+    @property
+    def premium(self):
         return self.value()
 
     def delta(self,**kwargs):
@@ -210,19 +203,25 @@ class BinomialOption:
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def gamma(self,precision=1e-4):
         result =  (self.delta(s=self.s+precision) - self.delta(s=self.s-precision))/(2*precision)
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def vega(self,precision=1e-4):
         result =  (self.value(sigma=self.sigma+precision) - self.value(sigma=self.sigma-precision))/(100*precision)
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def theta(self,precision=1e-4):
-        result =  -(self.value(t=self.t+precision) - self.value(t=self.t-precision))/(200*precision)
-        return self.qty*(result if self.pos=='l' else -result)
+        '''Poor approximation of theta, avoid using'''
+        result =  -(self.value(t=self.t+precision) - self.value(t=self.t-precision))/(2*precision)
+        return self.qty*result / 365
+
+    def rho(self,precision=1e-4):
+        '''Poor approximation of rho, avoid using'''
+        result =  (self.value(r=self.r+precision) - self.value(r=self.r-precision))/(2*precision)
+        return self.qty*result / 100
 
     def plot_dist(self):
         sn.kdeplot(np.concatenate(self.tree),fill=True)
@@ -240,7 +239,7 @@ class BinomialOption:
         plt.show()
 
 class BSOption:
-    params = ['s','k','t','sigma','r','type_']
+    params = ['s','k','t','sigma','r','type']
     valid_types = {
         'c':'C',
         'C':'C',
@@ -252,14 +251,7 @@ class BSOption:
         'put':'P'
     }
 
-    valid_pos = {
-        'l':'l',
-        'long':'l',
-        's':'s',
-        'short':'s'
-    }
-
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.035,type_='C',pos='l',qty=1):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.035,type='C',qty=1):
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -269,21 +261,19 @@ class BSOption:
         self.sigma = sigma
         self.r = r
         self.qty = qty
-        if type_ not in self.valid_types.keys():
-            raise ValueError('`type_` must be \'call\', \'C\', \'put\', or \'P\'')
+        self.pos = 'long' if qty > 0 else 'short'
+        if type not in self.valid_types.keys():
+            raise ValueError('`type` must be \'call\', \'C\', \'put\', or \'P\'')
         else:
-            self.type_ = self.valid_types.get(type_)
-        if pos.lower() not in self.valid_pos.keys():
-            raise ValueError('`pos` must be \'l\', \'long\', \'s\', or \'short\'')
-        else:
-            self.pos = self.valid_pos.get(pos.lower())
+            self.type = self.valid_types.get(type)
+
         self.price = self.value
         self.default_params = {param:self.__dict__.get(param) for param in self.params}
         self.norm_cdf = scipy.stats.norm.cdf
         self.deriv = scipy.misc.derivative
 
     def __neg__(self):
-        return BSOption(self.s, self.k, self.t, self.sigma, self.r, type_=self.type_, pos='s',qty=self.qty)
+        return BSOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=-self.qty)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -292,30 +282,29 @@ class BSOption:
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
-        return BSOption(self.s, self.k, self.t, self.sigma, self.r, type_=self.type_, qty=self.qty*amount)
+        return BSOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=self.qty*amount)
 
     def __repr__(self):
-        return f'BSOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type_})'
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type})'
 
     def reset_params(self):
         for param in self.params:
             self.__dict__[param] = self.default_params[param]
 
-    def date_to_t(self,date):
+    @staticmethod
+    def date_to_t(date):
         if isinstance(date,str):
             date = pd.to_datetime(date).date()
         elif isinstance(date,datetime.datetime):
             date = date.date()
 
-        try:
-            import pandas_market_calendars as mcal
-            nyse = mcal.get_calendar('NYSE')
-            days = nyse.schedule(start_date=datetime.date.today(), end_date=date)
-            dt = len(days.index)/252
-        except:
-            dt = (date - datetime.date.today()).days/365
+        today = pd.Timestamp.today()
+        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+        holidays = us_holidays.holidays(start=today, end=date)
+        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
         
-        return dt
+        return dt/252
 
 
     def d1(self):
@@ -328,28 +317,32 @@ class BSOption:
         for key, val in kwargs.items():
             self.__dict__[key] = val
         
-        if self.type_ == 'C':
+        if self.type == 'C':
             result = self.s*self.norm_cdf(self.d1()) - self.k*((1+self.r)**-self.t)*self.norm_cdf(self.d2())
-        elif self.type_ == 'P':
+        elif self.type == 'P':
             result = self.k*((1+self.r)**-self.t)*self.norm_cdf(-self.d2()) - self.s*self.norm_cdf(-self.d1())
 
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
+    
+    @property
+    def premium(self):
+        return self.value()
 
     def delta(self,**kwargs):
         for key, val in kwargs.items():
             self.__dict__[key] = val
         
         result = self.norm_cdf(self.d1())
-        if self.type_ == 'P':
+        if self.type == 'P':
             result -= 1
 
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
         
     
     def gamma(self,**kwargs):
@@ -361,7 +354,7 @@ class BSOption:
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def vega(self,**kwargs):
         for key, val in kwargs.items():
@@ -372,21 +365,34 @@ class BSOption:
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result
 
     def theta(self,**kwargs):
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
-        if self.type_ == 'C':
-            result = -((self.s * np.exp((-self.d1()**2)/2 )/np.sqrt(2*np.pi) * self.sigma) / 2*(self.t**0.5)) - (self.r*self.k*np.exp(-self.t*(1+self.r))*self.norm_cdf(self.d2()))
-        else:
-            result = -((self.s * np.exp((-self.d1()**2)/2 )/np.sqrt(2*np.pi) * self.sigma) / 2*(self.t**0.5)) + (self.r*self.k*np.exp(-self.t*(1+self.r))*self.norm_cdf(-self.d2()))
+        if self.type == 'C':
+            result = -self.s * scipy.stats.norm.pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) - self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
+        elif self.type == 'P':
+            result = -self.s * scipy.stats.norm.pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) + self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(-self.d2())
+
+        result = result/365
+
+        return self.qty*result
+
+    def rho(self,**kwargs):
+        for key, val in kwargs.items():
+            self.__dict__[key] = val
+
+        if self.type == 'C':
+            result = self.k * self.t * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
+        elif self.type == 'P':
+            result = -self.k * self.t * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(-self.d2())
 
         if kwargs:
             self.reset_params()
 
-        return self.qty*(result if self.pos=='l' else -result)
+        return self.qty*result / 100
 
     def values(self):
         spot = np.linspace(self.k*0.85,self.k*1.15,80)
@@ -395,91 +401,83 @@ class BSOption:
 
     def summary(self):
         data = {
-                '':['price','delta','gamma','vega',''],
-                ' ':[self.price(),self.delta(),self.gamma(),self.vega(),'']
+                '':['price','delta','gamma','vega','theta','rho'],
+                ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        df2 = pd.DataFrame({' ':['S','K','IV','t','r'],'':[self.s,self.k,self.sigma,self.t,self.r]})
+        df2 = pd.DataFrame({' ':['S','K','IV','t','r',''],'':[self.s,self.k,self.sigma,self.t,self.r,'']})
 
-        summary_df = pd.concat({'greeks':df,'parameters':df2},axis=1)
+        summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
-    
-    def payoff_plot(self):
-        spot = np.linspace(self.k*0.85,self.k*1.15,80)
-        vals = np.array([self.value(s=i,t=1e-6) for i in spot])
 
-        plt.plot(spot,vals)
-        plt.vlines(self.k,-1,15,linestyle='--',alpha=0.5)
-        plt.ylim(-1,self.k*0.15)
-        plt.show()
+    def plot(self,var='payoff', interactive=False, resolution=40, return_ax=False):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
 
-    def pnl_plot(self):
-        spot = np.linspace(self.k*0.85,self.k*1.15,80)
-        vals = np.array([self.value(s=i,t=1e-6) for i in spot])
-        price = self.value()
-
-        plt.plot(spot,vals-price)
-        plt.vlines(self.k,-1.2*price,15,linestyle='--',alpha=0.5)
-        plt.hlines(0,self.k*0.85,self.k*1.15,color='black')
-        plt.ylim(-1.2*price,self.k*0.15)
-        plt.show()
-
-    def interactive_plot(self,var: str = 'value'):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', or \'vega\''''
-        greeks = {'value','delta','gamma','vega'}
-        
         if var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', or \'vega\'')
+            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\'')
 
-        if var=='value':
-            spot = np.linspace(self.s*0.85,self.s*1.15,80)
+        spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
 
-            def f(k=100,t=2,sigma=0.1,r=0.0075):
-                plt.plot(spot,[self.value(s=i,k=k,t=t,sigma=sigma,r=r) for i in spot])
-                plt.plot(spot,[self.value(s=i,k=k,sigma=sigma,t=1e-6,r=r) for i in spot])
-                plt.vlines(k,-1,15,linestyle='--',alpha=0.5)
-                plt.ylim(-1,self.s*0.15)
+        if not interactive or var=='payoff':
+            if var == 'payoff':
+                vals = np.array([self.value(s=i,t=1e-6) for i in spot])
+            elif var == 'pnl':
+                cost = self.value()
+                vals = np.array([self.value(s=i,t=1e-6) - cost for i in spot])
+            elif var == 'value':
+                vals = np.array([self.value(s=i) for i in spot])
+            elif var == 'delta':
+                vals = np.array([self.delta(s=i) for i in spot])
+            elif var == 'gamma':
+                vals = np.array([self.gamma(s=i) for i in spot])
+            elif var == 'vega':
+                vals = np.array([self.vega(s=i) for i in spot])
+            elif var == 'theta':
+                vals = np.array([self.theta(s=i) for i in spot])
+            elif var == 'rho':
+                vals = np.array([self.rho(s=i) for i in spot])
+
+            plt.plot(spot,vals)
+            plt.axhline(0,color='black')
+            plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
+
+            if return_ax:
+                return plt.gca()
+            else:
                 plt.show()
-
-        elif var=='delta':
-            spot = np.linspace(self.s/2,self.s*1.5,50)
-
-            def f(k=100,t=2,sigma=0.1,r=0.0075):
-                plt.plot(spot,[self.delta(s=i,t=t,sigma=sigma,k=k,r=r) for i in spot],label='$\Delta$')
-                if self.type_ =='C':
-                    plt.vlines(k,0,1,linestyle='--',alpha=0.5)
-                else:
-                    plt.vlines(k,0,-1,linestyle='--',alpha=0.5)
+        else:
+            def f(t=2,k=100,sigma=0.1,r=0.04):
+                kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r}
+                if var == 'payoff':
+                    plt.plot(spot,[self.value(s=i,**kwargs) for i in spot],label='Value')
+                    plt.plot(spot,[self.value(s=i,k=k,r=r,sigma=sigma,t=1e-6) for i in spot],label='Payoff at Expiration')
+                elif var == 'pnl':
+                    cost = self.value()
+                    plt.plot(spot,[self.value(s=i,**kwargs) - cost for i in spot],label='Value')
+                    plt.plot(spot,[self.value(s=i,k=k,r=r,sigma=sigma,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
+                elif var == 'value':
+                    plt.plot(spot,[self.value(s=i,**kwargs) for i in spot],label='Value')
+                elif var == 'delta':
+                    plt.plot(spot,[self.delta(s=i,**kwargs) for i in spot],label='$\Delta$')
+                elif var == 'gamma':
+                    plt.plot(spot,[self.gamma(s=i,**kwargs) for i in spot],label='$\Gamma$')
+                elif var == 'vega':
+                    plt.plot(spot,[self.vega(s=i,**kwargs) for i in spot],label='Vega')
+                elif var == 'theta':
+                    plt.plot(spot,[self.theta(s=i,**kwargs) for i in spot],label='$\Theta$')
+                elif var == 'rho':
+                    plt.plot(spot,[self.rho(s=i,**kwargs) for i in spot],label='Rho')
+                    
+                plt.axhline(0,color='black')
+                plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
                 plt.legend()
                 plt.show()
-                self.reset_params()
 
-        elif var=='gamma':
-            spot = np.linspace(self.s*0.7,self.s*1.3,100)
-            
-            def f(k=100,t=2,sigma=0.1,r=0.0075):
-                plt.plot(spot,[self.gamma(s=i,t=t,sigma=sigma,k=k,r=r) for i in spot],label='$\Gamma$')
-                plt.vlines(k,0,1,linestyle='--',alpha=0.5)
-                plt.ylim(0,0.5)
-                plt.legend()
-                plt.show()
-                self.reset_params()
-
-        elif var=='vega':
-            spot = np.linspace(self.s*0.7,self.s*1.3,100)
-            
-            def f(k=100,t=2,sigma=0.1,r=0.0075):
-                plt.plot(spot,[self.vega(s=i,t=t,sigma=sigma,k=k,r=r) for i in spot],label='Vega')
-                plt.vlines(k,0,1,linestyle='--',alpha=0.5)
-                plt.ylim(0,0.5)
-                plt.legend()
-                plt.show()
-                self.reset_params()
-
-        interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.04,0.0001), k = (self.s*0.9,self.s*1.1,0.1))
-        output = interactive_plot.children[-1]
-        output.layout.height = '450px'
-        return interactive_plot
+            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1))
+            output = interactive_plot.children[-1]
+            output.layout.height = '450px'
+            return interactive_plot
 
 class OptionPortfolio:
 
@@ -487,7 +485,7 @@ class OptionPortfolio:
         self.options = args
 
     def __repr__(self):
-        os = '\n'.join([f'+{o.qty} {o.__repr__()}' if o.pos=='l' else f'-{o.qty} {o.__repr__()}' for o in self.options])
+        os = '\n'.join([repr(o) for o in self.options])
         output = f'OptionPortfolio(\n{os}\n)'
         return output
 
@@ -503,6 +501,10 @@ class OptionPortfolio:
     def price(self):
         return self.value()
 
+    @property
+    def premium(self):
+        return self.value()
+
     def delta(self, **kwargs):
         return sum(i.delta(**kwargs) for i in self.options)
 
@@ -512,26 +514,32 @@ class OptionPortfolio:
     def vega(self, **kwargs):
         return sum(i.vega(**kwargs) for i in self.options)
 
+    def theta(self, **kwargs):
+        return sum(i.theta(**kwargs) for i in self.options)
+
+    def rho(self, **kwargs):
+        return sum(i.rho(**kwargs) for i in self.options)
+
     def summary(self):
         data = {
-                '':['price','delta','gamma','vega',''],
-                ' ':[self.price(),self.delta(),self.gamma(),self.vega(),'']
+                '':['total cost','delta','gamma','vega','theta','rho'],
+                ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        dat = {'':['S','K','IV','t','r']}
-        pos_symbol = lambda x: '+' if x=='l' else '-'
-        dat.update({f'Leg {idx+1} ({pos_symbol(o.pos)}{o.type_})':[o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options)})
+        dat = {'':['price','S','K','IV','t','r']}
+        format_qty = lambda x: f'+{x}' if x>0 else f'{x}'
+        dat.update({f'Leg {idx+1} ({format_qty(o.qty)}{o.type})':[o.price(),o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options)})
         df2 = pd.DataFrame(dat)
 
-        summary_df = pd.concat({'greeks':df,'parameters':df2},axis=1)
+        summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='payoff', interactive=False, resolution=60):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\',\'payoff\', or \'pnl\''''
-        greeks = {'value','delta','gamma','vega','pnl','payoff'}
+    def plot(self,var='payoff', interactive=False, resolution=40, return_ax=False):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
 
         if var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', or \'vega\'')
+            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\'')
 
         ks = [o.k for o in self.options]
         spot = np.linspace(min(ks)*0.66,max(ks)*1.33,resolution)
@@ -550,60 +558,47 @@ class OptionPortfolio:
                 vals = np.array([self.gamma(s=i) for i in spot])
             elif var == 'vega':
                 vals = np.array([self.vega(s=i) for i in spot])
+            elif var == 'theta':
+                vals = np.array([self.theta(s=i) for i in spot])
+            elif var == 'rho':
+                vals = np.array([self.rho(s=i) for i in spot])
 
             plt.plot(spot,vals)
             plt.axhline(0,color='black')
             for k in ks:
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-            plt.show()
+
+            if return_ax:
+                return plt.gca()
+            else:
+                plt.show()
         else:
-            if var=='value':
-                def f(t=2):
+            def f(t=2):
+                if var == 'payoff':
                     plt.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
                     plt.plot(spot,[self.value(s=i,t=1e-6) for i in spot],label='Payoff at Expiration')
-                    plt.axhline(0,color='black')
-                    for k in ks:
-                        plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                    plt.legend()
-                    plt.show()
-
-            if var=='pnl':
-                cost = self.value()
-                def f(t=2):
+                elif var == 'pnl':
+                    cost = self.value()
                     plt.plot(spot,[self.value(s=i,t=t) - cost for i in spot],label='Value')
                     plt.plot(spot,[self.value(s=i,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
-                    plt.axhline(0,color='black')
-                    for k in ks:
-                        plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                    plt.legend()
-                    plt.show()
-
-            elif var=='delta':
-                def f(t=2):
+                elif var == 'value':
+                    plt.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
+                elif var == 'delta':
                     plt.plot(spot,[self.delta(s=i,t=t) for i in spot],label='$\Delta$')
-                    plt.axhline(0,color='black')
-                    for k in ks:
-                        plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                    plt.legend()
-                    plt.show()
-
-            elif var=='gamma':
-                def f(t=2):
+                elif var == 'gamma':
                     plt.plot(spot,[self.gamma(s=i,t=t) for i in spot],label='$\Gamma$')
-                    plt.axhline(0,color='black')
-                    for k in ks:
-                        plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                    plt.legend()
-                    plt.show()
-
-            elif var=='vega':
-                def f(t=2):
+                elif var == 'vega':
                     plt.plot(spot,[self.vega(s=i,t=t) for i in spot],label='Vega')
-                    plt.axhline(0,color='black')
-                    for k in ks:
-                        plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                    plt.legend()
-                    plt.show()
+                elif var == 'theta':
+                    plt.plot(spot,[self.theta(s=i,t=t) for i in spot],label='$\Theta$')
+                elif var == 'rho':
+                    plt.plot(spot,[self.rho(s=i,t=t) for i in spot],label='Rho')
+                    
+                plt.axhline(0,color='black')
+                for k in ks:
+                    plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
+                plt.legend()
+                plt.show()
 
             interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001))
             output = interactive_plot.children[-1]
@@ -680,6 +675,4 @@ class VolSurface:
 
 
 if __name__=='__main__':
-    call = BSOption()
-    put = BSOption(type_='p')
-    call.payoff_plot()
+    pass
