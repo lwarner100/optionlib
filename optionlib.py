@@ -67,7 +67,8 @@ class BinomialOption:
 
 
     def __repr__(self):
-        return f'BinomialOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
 
     def __neg__(self):
         return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty)
@@ -410,35 +411,53 @@ class BSOption:
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='payoff', interactive=False, resolution=40, return_ax=False):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
+    def plot(self, var, interactive=False, resolution=40, return_ax=False):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
 
-        if var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\'')
+        if isinstance(var,str) and var not in greeks: 
+            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\'')
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
+        if var == 'summary':
+            var = ['value','delta','gamma','vega','theta','rho']
 
-        if not interactive or var=='payoff':
+        if isinstance(var, (list, tuple, np.ndarray)) and all([i in greeks for i in var]):
+            var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
+            facet_map = {
+                            2:(2,1),
+                            3:(2,2),
+                            4:(2,2),
+                            5:(3,2),
+                            6:(3,2),
+                            7:(3,3),
+                            8:(3,3)
+                        }
+            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3*facet_map.get(len(var))[1]))
+            for i, ax in enumerate(axs.flatten()):
+                if i < len(var):
+                    ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
+                    ax.set_title(var[i])
+                    ax.axvline(self.k, color='black', linestyle='--', alpha=0.5)
+                    ax.axhline(0, color='black')
+        else:
+            var = var.lower()
+
+
+        if (not interactive or var=='payoff') and isinstance(var,str):
             if var == 'payoff':
-                vals = np.array([self.value(s=i,t=1e-6) for i in spot])
+                vals = [self.value(s=i,t=1e-6) for i in spot]
             elif var == 'pnl':
                 cost = self.value()
-                vals = np.array([self.value(s=i,t=1e-6) - cost for i in spot])
-            elif var == 'value':
-                vals = np.array([self.value(s=i) for i in spot])
-            elif var == 'delta':
-                vals = np.array([self.delta(s=i) for i in spot])
-            elif var == 'gamma':
-                vals = np.array([self.gamma(s=i) for i in spot])
-            elif var == 'vega':
-                vals = np.array([self.vega(s=i) for i in spot])
-            elif var == 'theta':
-                vals = np.array([self.theta(s=i) for i in spot])
-            elif var == 'rho':
-                vals = np.array([self.rho(s=i) for i in spot])
+                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+            else:
+                vals = [getattr(self,var)(s=i) for i in spot]
 
             plt.plot(spot,vals)
+            if var == 'pnl':
+                plt.title('P&L')
+            else:
+                plt.title(var.capitalize())
             plt.axhline(0,color='black')
             plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
 
@@ -446,7 +465,7 @@ class BSOption:
                 return plt.gca()
             else:
                 plt.show()
-        else:
+        elif interactive and isinstance(var,str):
             def f(t=2,k=100,sigma=0.1,r=0.04):
                 kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r}
                 if var == 'payoff':
@@ -456,22 +475,16 @@ class BSOption:
                     cost = self.value()
                     plt.plot(spot,[self.value(s=i,**kwargs) - cost for i in spot],label='Value')
                     plt.plot(spot,[self.value(s=i,k=k,r=r,sigma=sigma,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
-                elif var == 'value':
-                    plt.plot(spot,[self.value(s=i,**kwargs) for i in spot],label='Value')
-                elif var == 'delta':
-                    plt.plot(spot,[self.delta(s=i,**kwargs) for i in spot],label='$\Delta$')
-                elif var == 'gamma':
-                    plt.plot(spot,[self.gamma(s=i,**kwargs) for i in spot],label='$\Gamma$')
-                elif var == 'vega':
-                    plt.plot(spot,[self.vega(s=i,**kwargs) for i in spot],label='Vega')
-                elif var == 'theta':
-                    plt.plot(spot,[self.theta(s=i,**kwargs) for i in spot],label='$\Theta$')
-                elif var == 'rho':
-                    plt.plot(spot,[self.rho(s=i,**kwargs) for i in spot],label='Rho')
-                    
+                else:
+                    plt.plot(spot,[getattr(self,var)(s=i,**kwargs) for i in spot])
+
+                if var == 'pnl':
+                    plt.title('P&L')
+                else:
+                    plt.title(var.capitalize())
+                plt.title(var.capitalize())
                 plt.axhline(0,color='black')
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                plt.legend()
                 plt.show()
 
             interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1))
@@ -534,36 +547,55 @@ class OptionPortfolio:
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='payoff', interactive=False, resolution=40, return_ax=False):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
+    def plot(self,var='pnl', interactive=False, resolution=40, return_ax=False):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
 
-        if var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or \'pnl\'')
+        if isinstance(var,str) and var not in greeks: 
+            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\'')
 
         ks = [o.k for o in self.options]
         spot = np.linspace(min(ks)*0.66,max(ks)*1.33,resolution)
 
-        if not interactive or var=='payoff':
+        if var == 'summary':
+            var = ['value','delta','gamma','vega','theta','rho']
+
+        if isinstance(var, (list, tuple, np.ndarray)) and all([i in greeks for i in var]):
+            var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
+            facet_map = {
+                            2:(2,1),
+                            3:(2,2),
+                            4:(2,2),
+                            5:(3,2),
+                            6:(3,2),
+                            7:(3,3),
+                            8:(3,3)
+                        }
+            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3*facet_map.get(len(var))[1]))
+            for i, ax in enumerate(axs.flatten()):
+                if i < len(var):
+                    ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
+                    ax.set_title(var[i])
+                    for k in ks:
+                        ax.axvline(k, color='black', linestyle='--', alpha=0.5)
+                    ax.axhline(0, color='black')
+        else:
+            var = var.lower()
+
+        if (not interactive or var=='payoff') and isinstance(var,str):
             if var == 'payoff':
-                vals = np.array([self.value(s=i,t=1e-6) for i in spot])
+                vals = [self.value(s=i,t=1e-6) for i in spot]
             elif var == 'pnl':
                 cost = self.value()
-                vals = np.array([self.value(s=i,t=1e-6) - cost for i in spot])
-            elif var == 'value':
-                vals = np.array([self.value(s=i) for i in spot])
-            elif var == 'delta':
-                vals = np.array([self.delta(s=i) for i in spot])
-            elif var == 'gamma':
-                vals = np.array([self.gamma(s=i) for i in spot])
-            elif var == 'vega':
-                vals = np.array([self.vega(s=i) for i in spot])
-            elif var == 'theta':
-                vals = np.array([self.theta(s=i) for i in spot])
-            elif var == 'rho':
-                vals = np.array([self.rho(s=i) for i in spot])
+                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+            else:
+                vals = [getattr(self,var)(s=i) for i in spot]
 
             plt.plot(spot,vals)
+            if var == 'pnl':
+                plt.title('P&L')
+            else:
+                plt.title(var.capitalize())
             plt.axhline(0,color='black')
             for k in ks:
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
@@ -572,32 +604,27 @@ class OptionPortfolio:
                 return plt.gca()
             else:
                 plt.show()
-        else:
+        elif interactive and isinstance(var,str):
             def f(t=2):
                 if var == 'payoff':
                     plt.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
                     plt.plot(spot,[self.value(s=i,t=1e-6) for i in spot],label='Payoff at Expiration')
+                    plt.legend()
                 elif var == 'pnl':
                     cost = self.value()
                     plt.plot(spot,[self.value(s=i,t=t) - cost for i in spot],label='Value')
                     plt.plot(spot,[self.value(s=i,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
-                elif var == 'value':
-                    plt.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
-                elif var == 'delta':
-                    plt.plot(spot,[self.delta(s=i,t=t) for i in spot],label='$\Delta$')
-                elif var == 'gamma':
-                    plt.plot(spot,[self.gamma(s=i,t=t) for i in spot],label='$\Gamma$')
-                elif var == 'vega':
-                    plt.plot(spot,[self.vega(s=i,t=t) for i in spot],label='Vega')
-                elif var == 'theta':
-                    plt.plot(spot,[self.theta(s=i,t=t) for i in spot],label='$\Theta$')
-                elif var == 'rho':
-                    plt.plot(spot,[self.rho(s=i,t=t) for i in spot],label='Rho')
-                    
+                    plt.legend()
+                else:
+                    plt.plot(spot,[getattr(self,var)(s=i,t=t) for i in spot])
+
+                if var == 'pnl':
+                    plt.title('P&L')
+                else:
+                    plt.title(var.capitalize())
                 plt.axhline(0,color='black')
                 for k in ks:
                     plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                plt.legend()
                 plt.show()
 
             interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001))
