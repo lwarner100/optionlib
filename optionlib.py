@@ -15,8 +15,8 @@ import wallstreet as ws
 import ipywidgets as widgets
 from IPython.display import clear_output
 
-class BinomialOption:
-    params = ['s','k','t','sigma','r','type','tree','style']
+class Option:
+    '''Base class for building other pricing models'''
     valid_types = {
         'c':'C',
         'C':'C',
@@ -39,7 +39,39 @@ class BinomialOption:
         'european':'E',
     }
 
+    def __init__(self,*args, **kwargs):
+        pass
+
+    @staticmethod
+    def date_to_t(date):
+        if isinstance(date,str):
+            date = pd.to_datetime(date).date()
+        elif isinstance(date,datetime.datetime):
+            date = date.date()
+
+        today = pd.Timestamp.today()
+        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+        holidays = us_holidays.holidays(start=today, end=date)
+        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
+        
+        return dt/252
+
+class BinomialOption(Option):
+    '''Implementation of the Binomial Tree option pricing model
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `style`: either \'american\' or \'european\' or abbrevations \'a\' or \'e\'
+    `n`: the number of periods to use in the binomial tree
+    `qty`: the number of contracts (sign implies a long or short position)
+    '''
+    params = ['s','k','t','sigma','r','type','tree','style']
+
     def __init__(self, s, k, t, sigma, r, type: str='C', style: str='A', n: int=50, qty: int = 1):
+        super().__init__()
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -68,7 +100,7 @@ class BinomialOption:
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
+        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
 
     def __neg__(self):
         return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty)
@@ -81,21 +113,6 @@ class BinomialOption:
 
     def __mul__(self,amount: int):
         return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
-
-
-    @staticmethod
-    def date_to_t(date):
-        if isinstance(date,str):
-            date = pd.to_datetime(date).date()
-        elif isinstance(date,datetime.datetime):
-            date = date.date()
-
-        today = pd.Timestamp.today()
-        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
-        holidays = us_holidays.holidays(start=today, end=date)
-        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
-        
-        return dt/252
 
     def reset_params(self):
         for param in self.params:
@@ -224,6 +241,43 @@ class BinomialOption:
         result =  (self.value(r=self.r+precision) - self.value(r=self.r-precision))/(2*precision)
         return self.qty*result / 100
 
+    def plot(self,var='value',resolution=40, return_ax=False, **kwargs):
+        '''`var` must be either \'value\', \'delta\', \'payoff\', \'pnl\''''
+        greeks = {'value','delta','pnl','payoff'}
+        if kwargs.get('n'):
+            n = kwargs.get('n')
+        else:
+            n = self.n
+
+        if var not in greeks: 
+            raise ValueError('`var` must be either \'value\', \'delta\', \'payoff\', \'pnl\'')
+
+        spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
+
+        if var == 'payoff':
+            vals = [self.value(s=i,t=1e-6,n=n) for i in spot]
+        elif var == 'pnl':
+            cost = self.value()
+            vals = [self.value(s=i,t=1e-6,n=n) - cost for i in spot]
+        elif var == 'value':
+            vals = [self.value(s=i,n=n) for i in spot]
+        elif var == 'delta':
+            vals = [self.delta(s=i,n=n) for i in spot]
+
+        plt.plot(spot,vals)
+        if var == 'pnl':
+            plt.title('P&L')
+        else:
+            plt.title(var.capitalize())
+        plt.axhline(0,color='black')
+        plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
+
+        if return_ax:
+            return plt.gca()
+        else:
+            plt.show()
+
+
     def plot_dist(self):
         sn.kdeplot(np.concatenate(self.tree),fill=True)
 
@@ -239,20 +293,91 @@ class BinomialOption:
         plt.plot(x,ys,'o',markersize=1)
         plt.show()
 
-class BSOption:
-    params = ['s','k','t','sigma','r','type']
-    valid_types = {
-        'c':'C',
-        'C':'C',
-        'Call':'C',
-        'call':'C',
-        'p':'P',
-        'P':'P',
-        'Put':'P',
-        'put':'P'
+class BarrierOption(BinomialOption):
+    '''Class for pricing barrier options with the Binomial Tree option pricing model
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `barrier`: the barrier price
+    `barrier_type`: the type of barrier, \'KI\' for knock-in, \'KO\' for knock-out
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
+    `n`: the number of periods to use in the binomial tree
+    `qty`: the number of contracts (sign implies a long or short position)
+    '''
+    valid_barriers = {
+        'ki':'KI',
+        'ko':'KO',
+        'knockin':'KI',
+        'knockout':'KO'
     }
 
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.4, barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1):
+        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, n=n, type=type, style=style, qty=qty)
+        self.barrier = barrier
+        if barrier_type.lower() not in self.valid_barriers.keys():
+            raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
+        else:
+            self.barrier_type = self.valid_barriers.get(barrier_type.lower())
+    
+    def evaluate(self,price):
+        val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
+        if self.type == 'C':
+            if self.barrier_type == 'KO':
+                if price >= self.barrier:
+                    val = 0
+            elif self.barrier_type == 'KI':
+                if price <= self.barrier:
+                    val = 0
+        elif self.type == 'P':
+            if self.barrier_type == 'KO':
+                if price <= self.barrier:
+                    val = 0
+            elif self.barrier_type == 'KI':
+                if price >= self.barrier:
+                    val = 0
+        return val
+
+    def node_eval(self,price,Vu,Vd):
+        intrinsic_value = price - self.k if self.type == 'C' else self.k - price
+        if self.type == 'C':
+            if self.barrier_type == 'KO':
+                if price >= self.barrier:
+                    intrinsic_value = 0
+            elif self.barrier_type == 'KI':
+                if price <= self.barrier:
+                    intrinsic_value = 0
+        elif self.type == 'P':
+            if self.barrier_type == 'KO':
+                if price <= self.barrier:
+                    intrinsic_value = 0
+            elif self.barrier_type == 'KI':
+                if price >= self.barrier:
+                    intrinsic_value = 0
+        
+        if self.style == 'A':
+            val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
+        else:
+            val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
+        
+        return val
+
+class BSOption(Option):
+    '''Implementation of the Black-Scholes option pricing model
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `qty`: the number of contracts (sign implies a long or short position)
+    '''
+    params = ['s','k','t','sigma','r','type']
+
     def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.035,type='C',qty=1):
+        super().__init__()
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -287,26 +412,11 @@ class BSOption:
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={self.t}, sigma={self.sigma}, r={self.r}, type={self.type})'
+        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
 
     def reset_params(self):
         for param in self.params:
             self.__dict__[param] = self.default_params[param]
-
-    @staticmethod
-    def date_to_t(date):
-        if isinstance(date,str):
-            date = pd.to_datetime(date).date()
-        elif isinstance(date,datetime.datetime):
-            date = date.date()
-
-        today = pd.Timestamp.today()
-        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
-        holidays = us_holidays.holidays(start=today, end=date)
-        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
-        
-        return dt/252
-
 
     def d1(self):
         return (np.log(self.s/(self.k*((1+self.r)**-self.t))) + ((0.5*self.sigma**2))*self.t)/(self.sigma*(self.t**0.5))
@@ -426,20 +536,19 @@ class BSOption:
             var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
             facet_map = {
                             2:(2,1),
-                            3:(2,2),
+                            3:(3,1),
                             4:(2,2),
                             5:(3,2),
-                            6:(3,2),
-                            7:(3,3),
-                            8:(3,3)
+                            6:(3,2)
                         }
-            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3*facet_map.get(len(var))[1]))
+            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3.25*facet_map.get(len(var))[1]))
             for i, ax in enumerate(axs.flatten()):
                 if i < len(var):
                     ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
                     ax.set_title(var[i])
                     ax.axvline(self.k, color='black', linestyle='--', alpha=0.5)
                     ax.axhline(0, color='black')
+            plt.show()
         else:
             var = var.lower()
 
@@ -466,6 +575,7 @@ class BSOption:
             else:
                 plt.show()
         elif interactive and isinstance(var,str):
+            plt.ion()
             def f(t=2,k=100,sigma=0.1,r=0.04):
                 kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r}
                 if var == 'payoff':
@@ -485,17 +595,73 @@ class BSOption:
                 plt.title(var.capitalize())
                 plt.axhline(0,color='black')
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                plt.show()
 
             interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1))
             output = interactive_plot.children[-1]
             output.layout.height = '450px'
             return interactive_plot
 
-class OptionPortfolio:
+class DeltaHedge:
+    '''Represents a delta hedge sof a strategy'''
+    k = np.nan
 
-    def __init__(self,*args):
+    def __init__(self, **kwargs):
+        self.s = kwargs.get('s')
+        self.qty = kwargs.get('qty') or 1
+
+    def __repr__(self):
+        args = f's={self.s}, qty={round(self.qty,3)}' if self.s and self. qty else ''
+        return f'DeltaHedge({args})'
+
+    def __neg__(self):
+        return DeltaHedge(s=self.s, qty=-self.qty)
+
+    def value(self,**kwargs):
+        result = (self.qty * kwargs.get('s') if kwargs.get('s') else self.qty * self.s) - (self.s*self.qty)
+        return result
+
+    def price(self,**kwargs):
+        return self.value(**kwargs)
+
+    def delta(self,**kwargs):
+        return self.qty
+
+    def gamma(self,**kwargs):
+        return 0
+
+    def vega(self,**kwargs):
+        return 0
+
+    def theta(self,**kwargs):
+        return 0
+
+    def rho(self,**kwargs):
+        return 0
+
+class OptionPortfolio:
+    '''A Class for holding a portfolio of options for analysis
+    `args`: a list of Option objects
+    '''
+    delta_hedge = None
+
+    def __init__(self,*args,**kwargs):
+        args = list(args)
+        self.delta_hedge = kwargs.get('delta_hedge')
+        self._mod = kwargs.get('mod')
+
+        for idx, component in enumerate(args):
+            if isinstance(component, DeltaHedge):
+                self.delta_hedge = args.pop(idx)
         self.options = args
+
+        if not np.unique([i.s for i in self.options]).size == 1:
+            raise ValueError('All options must have the same underlying price')
+        self.s = self.options[0].s
+
+        if self.delta_hedge:
+            self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta())
+            self.options.append(self.delta_hedge)
+
 
     def __repr__(self):
         os = '\n'.join([repr(o) for o in self.options])
@@ -509,29 +675,61 @@ class OptionPortfolio:
         return OptionPortfolio(*(list(self.options) + [-other]))
 
     def value(self, **kwargs):
-        return sum(i.value(**kwargs) for i in self.options)
+        changed_hedge = False
+        if self.delta_hedge and 's' in kwargs.keys():
+            changed_hedge = True
+            self.options[-1] = DeltaHedge(s=kwargs['s'],qty=-sum(o.delta(s=kwargs['s']) for o in self.options[:-1]))
 
-    def price(self):
-        return self.value()
+        result = sum(i.value(**kwargs) for i in self.options)
 
-    @property
-    def premium(self):
-        return self.value()
+        if changed_hedge:
+            self.options[-1] = self.delta_hedge
+        if self._mod:
+            result /= 2*self._mod
+
+        return result
+
+    def price(self, **kwargs):
+        return self.value(**kwargs)
 
     def delta(self, **kwargs):
-        return sum(i.delta(**kwargs) for i in self.options)
+        changed_hedge = False
+        if self.delta_hedge and 's' in kwargs.keys():
+            changed_hedge = True
+            self.options[-1] = DeltaHedge(s=kwargs['s'],qty=-sum(o.delta(s=kwargs['s']) for o in self.options[:-1]))
+
+        result = sum(i.delta(**kwargs) for i in self.options)
+
+        if changed_hedge:
+            self.options[-1] = self.delta_hedge
+        if self._mod:
+                result /= 2*self._mod
+
+        return result
 
     def gamma(self, **kwargs):
-        return sum(i.gamma(**kwargs) for i in self.options)
+        result = sum(i.gamma(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
 
     def vega(self, **kwargs):
-        return sum(i.vega(**kwargs) for i in self.options)
+        result = sum(i.vega(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
 
     def theta(self, **kwargs):
-        return sum(i.theta(**kwargs) for i in self.options)
+        result = sum(i.theta(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
 
     def rho(self, **kwargs):
-        return sum(i.rho(**kwargs) for i in self.options)
+        result = sum(i.rho(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
 
     def summary(self):
         data = {
@@ -539,9 +737,12 @@ class OptionPortfolio:
                 ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        dat = {'':['price','S','K','IV','t','r']}
+        dat = {'':['value','S','K','IV','t','r']}
         format_qty = lambda x: f'+{x}' if x>0 else f'{x}'
-        dat.update({f'Leg {idx+1} ({format_qty(o.qty)}{o.type})':[o.price(),o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options)})
+        dat.update({f'Leg {idx+1} ({format_qty(o.qty)}{o.type})':[o.price(),o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options) if not isinstance(o,DeltaHedge)})
+        if self.delta_hedge:
+            sign = '+' if self.delta_hedge.qty > 0 else ''
+            dat.update({f'Delta Hedge ({sign}{round(self.delta_hedge.qty,2)} shares)':[self.delta_hedge.price(),self.delta_hedge.s,'','','','']})
         df2 = pd.DataFrame(dat)
 
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
@@ -564,14 +765,12 @@ class OptionPortfolio:
             var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
             facet_map = {
                             2:(2,1),
-                            3:(2,2),
+                            3:(3,1),
                             4:(2,2),
                             5:(3,2),
-                            6:(3,2),
-                            7:(3,3),
-                            8:(3,3)
+                            6:(3,2)
                         }
-            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3*facet_map.get(len(var))[1]))
+            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3.25*facet_map.get(len(var))[1]))
             for i, ax in enumerate(axs.flatten()):
                 if i < len(var):
                     ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
@@ -579,6 +778,7 @@ class OptionPortfolio:
                     for k in ks:
                         ax.axvline(k, color='black', linestyle='--', alpha=0.5)
                     ax.axhline(0, color='black')
+            plt.show()
         else:
             var = var.lower()
 
@@ -586,7 +786,8 @@ class OptionPortfolio:
             if var == 'payoff':
                 vals = [self.value(s=i,t=1e-6) for i in spot]
             elif var == 'pnl':
-                cost = self.value()
+                cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
+                plt.plot(spot,[self.value(s=i) - cost for i in spot])
                 vals = [self.value(s=i,t=1e-6) - cost for i in spot]
             else:
                 vals = [getattr(self,var)(s=i) for i in spot]
@@ -605,35 +806,74 @@ class OptionPortfolio:
             else:
                 plt.show()
         elif interactive and isinstance(var,str):
+            plt.ion()
             def f(t=2):
+                fig, ax = plt.subplots()
                 if var == 'payoff':
-                    plt.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
-                    plt.plot(spot,[self.value(s=i,t=1e-6) for i in spot],label='Payoff at Expiration')
-                    plt.legend()
+                    ax.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
+                    ax.plot(spot,[self.value(s=i,t=1e-6) for i in spot],label='Payoff at Expiration')
+                    ax.legend()
                 elif var == 'pnl':
-                    cost = self.value()
-                    plt.plot(spot,[self.value(s=i,t=t) - cost for i in spot],label='Value')
-                    plt.plot(spot,[self.value(s=i,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
-                    plt.legend()
+                    cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
+                    ax.plot(spot,[self.value(s=i,t=t) - cost for i in spot],label='Value')
+                    ax.plot(spot,[self.value(s=i,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
+                    ax.legend()
                 else:
-                    plt.plot(spot,[getattr(self,var)(s=i,t=t) for i in spot])
+                    ax.plot(spot,[getattr(self,var)(s=i,t=t) for i in spot])
 
                 if var == 'pnl':
-                    plt.title('P&L')
+                    ax.set_title('P&L')
                 else:
-                    plt.title(var.capitalize())
-                plt.axhline(0,color='black')
+                    ax.set_title(var.capitalize())
+                ax.axhline(0,color='black')
                 for k in ks:
-                    plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
-                plt.show()
+                    ax.axvline(k,linestyle='--',color='gray',alpha=0.7)
+                return ax
 
-            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001))
+            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.01))
             output = interactive_plot.children[-1]
             output.layout.height = '450px'
             return interactive_plot
 
+class DigitalOption(OptionPortfolio):
+    '''Digital Option
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `qty`: the number of contracts (sign implies a long or short position)
+    `precision`: the shift in `k` when calculating the limit of a spread
+    '''
+
+    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=0.04,type='C',qty=1, precision=1e-6):
+        self.components = [
+            BSOption(s=s,k=k+precision,t=t,sigma=sigma,r=r,type=type,qty=-qty),
+            BSOption(s=s,k=k-precision,t=t,sigma=sigma,r=r,type=type,qty=qty),
+            ]
+        super().__init__(*self.components,mod=precision)
+
+        self.s = s
+        self.k = k
+        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+            self.t = Option.date_to_t(t)
+        else:
+            self.t = t
+        self.sigma = sigma
+        self.r = r
+        self.type = type
+        self.qty = qty
+        self.precision = precision
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} DigitalOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
 
 class VolSurface:
+    '''Object that retrieves the volatility surface from the market for a given underlying
+    `underlying`: the underlying ticker
+    `moneyness`: boolean to determine whether to use abolute strikes or % moneyness'''
 
     def __init__(self, ticker, moneyness=False):
         self.ticker = ticker
@@ -702,4 +942,10 @@ class VolSurface:
 
 
 if __name__=='__main__':
-    pass
+    # put = BSOption(k=90,type='put')
+    # call = BSOption(k=110,type='call')
+    # hedge = DeltaHedge()
+    # p = put + hedge
+    # print(p.delta_hedge)
+    barrier_call = BarrierOption(100,100,0.25,0.3,0.04,type='call',style='E',barrier=120,barrier_type='KO',n=100)
+    barrier_call.plot()
