@@ -321,6 +321,11 @@ class BarrierOption(BinomialOption):
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
         else:
             self.barrier_type = self.valid_barriers.get(barrier_type.lower())
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
+
     
     def evaluate(self,price):
         val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
@@ -947,5 +952,5 @@ if __name__=='__main__':
     # hedge = DeltaHedge()
     # p = put + hedge
     # print(p.delta_hedge)
-    barrier_call = BarrierOption(100,100,0.25,0.3,0.04,type='call',style='E',barrier=120,barrier_type='KO',n=100)
-    barrier_call.plot()
+    barrier_call = BarrierOption(100,100,0.25,0.3,0.04,type='call',style='E',barrier=120,barrier_type='KI',n=100)
+    barrier_call.plot('pnl')
