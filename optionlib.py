@@ -15,6 +15,8 @@ import wallstreet as ws
 import ipywidgets as widgets
 from IPython.display import clear_output
 
+from cboe import CBOE
+
 class Option:
     '''Base class for building other pricing models'''
     valid_types = {
@@ -85,11 +87,11 @@ class BinomialOption(Option):
         self.pos = 'long' if qty > 0 else 'short'
 
         if type not in self.valid_types.keys():
-            raise ValueError('`type` must be \'call\', \'C\', \'put\', or \'P\'')
+            raise ValueError('`type` must be call, C, put, or P')
         else:
             self.type = self.valid_types.get(type)
         if style not in self.valid_styles.keys():
-            raise ValueError('`style` must be \'American\', \'A\', \'European\', or \'E\'')
+            raise ValueError('`style` must be American, A, European, or E')
         else:
             self.style = self.valid_styles.get(style)
 
@@ -250,7 +252,7 @@ class BinomialOption(Option):
             n = self.n
 
         if var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'payoff\', \'pnl\'')
+            raise ValueError('`var` must be either value, delta, payoff, pnl')
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
 
@@ -394,7 +396,7 @@ class BSOption(Option):
         self.qty = qty
         self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
-            raise ValueError('`type` must be \'call\', \'C\', \'put\', or \'P\'')
+            raise ValueError('`type` must be call, C, put, or P')
         else:
             self.type = self.valid_types.get(type)
 
@@ -448,6 +450,7 @@ class BSOption(Option):
         return self.value()
 
     def delta(self,**kwargs):
+        '''dC / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
         
@@ -462,6 +465,7 @@ class BSOption(Option):
         
     
     def gamma(self,**kwargs):
+        '''d^2C / ds^2 or dDelta / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -472,7 +476,44 @@ class BSOption(Option):
 
         return self.qty*result
 
+    def speed(self,**kwargs):
+        '''d^3C / ds^3 or dGamma / ds'''
+        for key, val in kwargs.items():
+            self.__dict__[key] = val
+
+        result = -(self.gamma() / self.s) * ((self.d1() / (self.sigma * np.sqrt(self.t))) + 1)
+
+        if kwargs:
+            self.reset_params()
+
+        return self.qty*result
+
+    def acceleration(self,**kwargs):
+        '''d^4C / ds^4 or dSpeed / ds'''
+        for key, val in kwargs.items():
+            self.__dict__[key] = val
+
+        result = scipy.misc.derivative(lambda x: self.speed(s=x), self.s, dx=1e-6, n=1)
+
+        if kwargs:
+            self.reset_params()
+
+        return self.qty*result
+
+    def jerk(self,**kwargs):
+        '''d^5C / ds^5 or dAcceleration / ds'''
+        for key, val in kwargs.items():
+            self.__dict__[key] = val
+
+        result = scipy.misc.derivative(lambda x: self.acceleration(s=x), self.s, dx=1e-6, n=1)
+
+        if kwargs:
+            self.reset_params()
+
+        return self.qty*result
+
     def vega(self,**kwargs):
+        '''dC / dSigma'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -483,7 +524,20 @@ class BSOption(Option):
 
         return self.qty*result
 
+    def vanna(self,**kwargs):
+        '''d^2C / ds dSigma or dVega / ds'''
+        for key, val in kwargs.items():
+            self.__dict__[key] = val
+
+        result = (self.vega() / self.s) * (1 - (self.d1() / (self.sigma * np.sqrt(self.t))))
+
+        if kwargs:
+            self.reset_params()
+
+        return self.qty*result
+
     def theta(self,**kwargs):
+        '''-dC / dt'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -497,6 +551,7 @@ class BSOption(Option):
         return self.qty*result
 
     def rho(self,**kwargs):
+        '''dC / dr'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -526,12 +581,12 @@ class BSOption(Option):
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self, var, interactive=False, resolution=40, return_ax=False):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
+    def plot(self, var='pnl', interactive=False, resolution=40, return_ax=False):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'vanna\' \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
+        greeks = {'value','delta','gamma','vega','vanna','rho','theta','pnl','payoff','speed','summary'}
 
         if isinstance(var,str) and var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\'')
+            raise ValueError('`var` must be either value, delta, gamma, speed, vega, vanna, theta, rho, payoff, pnl, or summary')
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
         if var == 'summary':
@@ -607,12 +662,16 @@ class BSOption(Option):
             return interactive_plot
 
 class DeltaHedge:
-    '''Represents a delta hedge sof a strategy'''
+    '''Represents a delta hedge of a strategy'''
     k = np.nan
 
     def __init__(self, **kwargs):
         self.s = kwargs.get('s')
         self.qty = kwargs.get('qty') or 1
+        self._gamma = kwargs.get('gamma') or 0
+        self._speed = kwargs.get('speed') or 0
+        self._acceleration = kwargs.get('acceleration') or 0
+        self._jerk = kwargs.get('jerk') or 0
 
     def __repr__(self):
         args = f's={self.s}, qty={round(self.qty,3)}' if self.s and self. qty else ''
@@ -622,8 +681,21 @@ class DeltaHedge:
         return DeltaHedge(s=self.s, qty=-self.qty)
 
     def value(self,**kwargs):
-        result = (self.qty * kwargs.get('s') if kwargs.get('s') else self.qty * self.s) - (self.s*self.qty)
+        # result = (self.qty * kwargs.get('s') - (self.s*self.qty) if kwargs.get('s') else self.qty * self.s) - (self.s*self.qty)
+        if kwargs.get('s'):
+            result = (
+                ( self.qty * (kwargs.get('s') - self.s))
+                + ( self.gamma() * (kwargs.get('s') - self.s)**2)
+                +  ( self.speed() * (kwargs.get('s') - self.s)**3)
+                +  ( self._acceleration * (kwargs.get('s') - self.s)**4)
+                +  ( self._jerk * (kwargs.get('s') - self.s)**5)
+                )
+        else:
+            result = 0
         return result
+
+    def cost(self):
+        return self.qty * self.s
 
     def price(self,**kwargs):
         return self.value(**kwargs)
@@ -632,7 +704,10 @@ class DeltaHedge:
         return self.qty
 
     def gamma(self,**kwargs):
-        return 0
+        return self._gamma
+
+    def speed(self,**kwargs):
+        return self._speed 
 
     def vega(self,**kwargs):
         return 0
@@ -664,7 +739,7 @@ class OptionPortfolio:
         self.s = self.options[0].s
 
         if self.delta_hedge:
-            self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta())
+            self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta(),gamma=-self.gamma(),speed=-self.speed(),acceleration=-self.acceleration())
             self.options.append(self.delta_hedge)
 
 
@@ -680,15 +755,8 @@ class OptionPortfolio:
         return OptionPortfolio(*(list(self.options) + [-other]))
 
     def value(self, **kwargs):
-        changed_hedge = False
-        if self.delta_hedge and 's' in kwargs.keys():
-            changed_hedge = True
-            self.options[-1] = DeltaHedge(s=kwargs['s'],qty=-sum(o.delta(s=kwargs['s']) for o in self.options[:-1]))
-
         result = sum(i.value(**kwargs) for i in self.options)
 
-        if changed_hedge:
-            self.options[-1] = self.delta_hedge
         if self._mod:
             result /= 2*self._mod
 
@@ -718,8 +786,32 @@ class OptionPortfolio:
             result /= 2*self._mod
         return result
 
+    def speed(self, **kwargs):
+        result = sum(i.speed(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
+
+    def acceleration(self, **kwargs):
+        result = sum(i.acceleration(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
+
+    def jerk(self, **kwargs):
+        result = sum(i.jerk(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
+    
     def vega(self, **kwargs):
         result = sum(i.vega(**kwargs) for i in self.options)
+        if self._mod:
+            result /= 2*self._mod
+        return result
+
+    def vanna(self, **kwargs):
+        result = sum(i.vanna(**kwargs) for i in self.options)
         if self._mod:
             result /= 2*self._mod
         return result
@@ -753,15 +845,15 @@ class OptionPortfolio:
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='pnl', interactive=False, resolution=40, return_ax=False):
+    def plot(self,var='pnl', interactive=False, resolution=40, return_ax=False, xrange=0.3):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
+        greeks = {'value','delta','gamma','speed','vega','vanna','rho','theta','pnl','payoff','summary'}
 
         if isinstance(var,str) and var not in greeks: 
-            raise ValueError('`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\'')
+            raise ValueError('`var` must be either value, delta, gamma, speed, vega, vanna, theta, rho, payoff, pnl, or summary')
 
         ks = [o.k for o in self.options]
-        spot = np.linspace(min(ks)*0.66,max(ks)*1.33,resolution)
+        spot = np.linspace(min(ks)*(1-xrange),max(ks)*(1+xrange),resolution)
 
         if var == 'summary':
             var = ['value','delta','gamma','vega','theta','rho']
@@ -878,44 +970,54 @@ class DigitalOption(OptionPortfolio):
 class VolSurface:
     '''Object that retrieves the volatility surface from the market for a given underlying
     `underlying`: the underlying ticker
-    `moneyness`: boolean to determine whether to use abolute strikes or % moneyness'''
+    `moneyness`: boolean to determine whether to use abolute strikes or % moneyness
+    `source`: the source of the data, either \'CBOE\' or \'wallstreet\''''
 
-    def __init__(self, ticker, moneyness=False):
+    def __init__(self, ticker, moneyness=False, source='CBOE'):
         self.ticker = ticker
         self.moneyness = moneyness
+        self.source = source
+        if self.source.lower() == 'cboe':
+            self.client = CBOE()
+        self.underlying = ws.Stock(self.ticker)
+        self.spot = self.underlying.price
 
     def get_data(self):
-        underlying = ws.Stock(self.ticker)
-        self.spot = underlying.price
-        call = ws.Call(self.ticker)
-        dates = pd.to_datetime(call.expirations).sort_values()
-        dates = [date for date in dates if date > datetime.date.today()]
+        if self.source.lower() == 'cboe':
+            calls = self.client.get_options(self.ticker,'C')
+            puts = self.client.get_options(self.ticker,'P')
+            data = pd.concat([calls,puts])
+        else:
+            call = ws.Call(self.ticker)
+            dates = pd.to_datetime(call.expirations).sort_values()
+            dates = [date for date in dates if date > datetime.date.today()]
 
-        for date in dates:
-            call = ws.Call(self.ticker,date.day,date.month,date.year)
-            clear_output()
-            put = ws.Put(self.ticker,date.day,date.month,date.year)
-            clear_output()
-            dat = pd.DataFrame(call.data + put.data)
-            dat['date'] = date
-            dat['type'] = dat.contractSymbol.str[-9]
-            if date == dates[0]:
-                data = dat
+            for date in dates:
+                call = ws.Call(self.ticker,date.day,date.month,date.year)
+                clear_output()
+                put = ws.Put(self.ticker,date.day,date.month,date.year)
+                clear_output()
+                dat = pd.DataFrame(call.data + put.data)
+                dat['date'] = date
+                dat['type'] = dat.contractSymbol.str[-9]
+                if date == dates[0]:
+                    data = dat
 
-            data = pd.concat([data,dat])
-        
+                data = pd.concat([data,dat])
+            data = data.rename(columns={'date':'expiry','impliedVolatility':'mid_iv','type':'option_type'})
+
         return data
 
     def get_vol_surface(self,moneyness=False):
         if not hasattr(self,'data'):
             self.data = self.get_data()
 
-        vol_data = self.data[['strike','impliedVolatility','lastPrice','date','type']]
-        vol_data = vol_data[((vol_data.strike >= self.spot)&(vol_data.type=='C'))|((vol_data.strike < self.spot)&(vol_data.type=='P'))]
+        vol_data = self.data[['strike','mid_iv','expiry','option_type']]
+        vol_data = vol_data[((vol_data.strike >= self.spot)&(vol_data.option_type=='C'))|((vol_data.strike < self.spot)&(vol_data.option_type=='P'))]
         if moneyness:
             vol_data['strike'] = (vol_data.strike / self.spot)*100
 
-        return vol_data.sort_values(['date','strike'])
+        return vol_data.sort_values(['expiry','strike'])
 
     def skew_plot(self,*args):
         if not hasattr(self,'surface'):
@@ -925,32 +1027,94 @@ class VolSurface:
         if args:
             idx = [int(i) for i in args if str(i).isnumeric()]
 
-        tbl = self.surface.pivot_table('impliedVolatility','strike','date').dropna()
+        tbl = self.surface.pivot_table('mid_iv','strike','expiry').dropna()
         tbl.iloc[:,idx].plot()
         ttl = tbl.columns[idx][0].strftime('Expiration: %m-%d-%Y') if idx!=0 else tbl.columns[idx].strftime('Expiration: %m-%d-%Y')
         plt.title(ttl)
         if self.moneyness:
             plt.xlabel('strike (% moneyness)')
+        plt.plot()
 
     def surface_plot(self):
         if not hasattr(self,'surface'):
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
 
-        fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.date, z=self.surface.impliedVolatility, intensity=self.surface.impliedVolatility)])
+        fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
         fig.show()
 
     @property
     def surface_table(self):
         if not hasattr(self,'surface'):
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
-        return self.surface.pivot_table('impliedVolatility','strike','date').dropna()
+        return self.surface.pivot_table('mid_iv','strike','expiry').dropna()
 
+class GEX:
+    '''Object that retrieves the GEX data from the market'''
+    
+    def __init__(self, CLIENT_ID=None, CLIENT_SECRET=None):
+        try:
+            self.client = CBOE()
+        except ValueError:
+            self.client = CBOE(CLIENT_ID,CLIENT_SECRET)
+        self.today = datetime.datetime.today()
+        self.spy = ws.Stock('SPY')
+
+    def get_gex(self,date=None):
+        if date:
+            if isinstance(date,str):
+                if 'e' in date:
+                    date = self.client.convert_exp_shorthand(date)
+                else:
+                    date = pd.to_datetime(date)
+            month = date.month
+            year = date.year
+            day = date.day or None
+        else:
+            month = self.today.month
+            year = self.today.year
+            day = None
+
+        query = f'exp_month == {month} and exp_year == {year}' if not day else f'exp_month == {month} and exp_year == {year} and exp_day == {day}'
+        calls = self.client.get_options('SPY','C')
+        puts = self.client.get_options('SPY','P')
+        data = pd.concat([calls,puts])
+        return data.query(query).sort_values('strike')
+
+    def plot(self, date=None, quantile=0.7):
+        if not date:
+            date = (self.today + datetime.timedelta(days=30)).strftime('%m-%Y')
+        elif 'e' in date:
+            date = self.client.convert_exp_shorthand(date)
+        else:
+            date = pd.to_datetime(date)
+        
+        gex = self.get_gex(date)
+        high_interest = gex[gex.agg_gamma > gex.agg_gamma.quantile(quantile)]
+
+        aggs = {}
+        underlying_price = self.spy.price
+        spot = np.linspace(300,500,50)
+        for i in high_interest.iterrows():
+            i = i[1]
+            option = BSOption(
+                s = self.spy.price,
+                k = i.strike,
+                r = 0.02,
+                t = i.expiry,
+                sigma = i.mid_iv,
+                type = i.option_type
+            )
+            gams = np.array([option.gamma(s=x)*i.open_interest*i.dealer_pos*100*underlying_price for x in spot])
+            aggs.update({i.option:gams})
+
+        fig, ax = plt.subplots(figsize=(10,6))
+        ax.plot(spot,sum(aggs.values()))
+        ax.set_title(f'Dealer Gamma Exposure for {date.strftime("%m-%d-%Y")}')
+        ax.set_xlabel('Strike')
+        ax.set_ylabel('Gamma Exposure')
+        ax.axhline(0,color='black')
+        ax.grid()
+        plt.show()
 
 if __name__=='__main__':
-    # put = BSOption(k=90,type='put')
-    # call = BSOption(k=110,type='call')
-    # hedge = DeltaHedge()
-    # p = put + hedge
-    # print(p.delta_hedge)
-    barrier_call = BarrierOption(100,100,0.25,0.3,0.04,type='call',style='E',barrier=120,barrier_type='KI',n=100)
-    barrier_call.plot('pnl')
+    pass
