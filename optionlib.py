@@ -1,5 +1,6 @@
 import os
 import datetime
+import warnings
 
 import numpy as np
 import scipy
@@ -16,6 +17,9 @@ import ipywidgets as widgets
 from IPython.display import clear_output
 
 from cboe import CBOE
+
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 class Option:
     '''Base class for building other pricing models'''
@@ -70,9 +74,9 @@ class BinomialOption(Option):
     `n`: the number of periods to use in the binomial tree
     `qty`: the number of contracts (sign implies a long or short position)
     '''
-    params = ['s','k','t','sigma','r','type','tree','style']
+    params = ['s','k','t','sigma','r','type','tree','style','n','qty']
 
-    def __init__(self, s, k, t, sigma, r, type: str='C', style: str='A', n: int=50, qty: int = 1):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=50, qty: int = 1):
         super().__init__()
         self.s = s
         self.k = k
@@ -295,7 +299,7 @@ class BinomialOption(Option):
         plt.plot(x,ys,'o',markersize=1)
         plt.show()
 
-class BarrierOption(BinomialOption):
+class BarrierOption1(BinomialOption):
     '''Class for pricing barrier options with the Binomial Tree option pricing model
     `s`: underlying price at T=0 (now)
     `k`: strike price of the option
@@ -328,7 +332,6 @@ class BarrierOption(BinomialOption):
         sign = '+' if self.qty > 0 else ''
         return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
 
-    
     def evaluate(self,price):
         val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
         if self.type == 'C':
@@ -493,7 +496,7 @@ class BSOption(Option):
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
-        result = scipy.misc.derivative(lambda x: self.speed(s=x), self.s, dx=1e-6, n=1)
+        result = self.deriv(lambda x: self.speed(s=x), self.s, dx=1e-6, n=1)
 
         if kwargs:
             self.reset_params()
@@ -505,7 +508,7 @@ class BSOption(Option):
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
-        result = scipy.misc.derivative(lambda x: self.acceleration(s=x), self.s, dx=1e-6, n=1)
+        result = self.deriv(lambda x: self.acceleration(s=x), self.s, dx=1e-6, n=1)
 
         if kwargs:
             self.reset_params()
@@ -604,7 +607,7 @@ class BSOption(Option):
             fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3.25*facet_map.get(len(var))[1]))
             for i, ax in enumerate(axs.flatten()):
                 if i < len(var):
-                    ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
+                    ax.plot(spot, getattr(self,var[i])(s=spot))
                     ax.set_title(var[i])
                     ax.axvline(self.k, color='black', linestyle='--', alpha=0.5)
                     ax.axhline(0, color='black')
@@ -615,12 +618,12 @@ class BSOption(Option):
 
         if (not interactive or var=='payoff') and isinstance(var,str):
             if var == 'payoff':
-                vals = [self.value(s=i,t=1e-6) for i in spot]
+                vals = self.value(s=spot,t=1e-6)
             elif var == 'pnl':
                 cost = self.value()
-                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+                vals = self.value(s=spot,t=1e-6) - cost
             else:
-                vals = [getattr(self,var)(s=i) for i in spot]
+                vals = getattr(self,var)(s=spot)
 
             plt.plot(spot,vals)
             if var == 'pnl':
@@ -635,18 +638,17 @@ class BSOption(Option):
             else:
                 plt.show()
         elif interactive and isinstance(var,str):
-            plt.ion()
             def f(t=2,k=100,sigma=0.1,r=0.04):
                 kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r}
                 if var == 'payoff':
-                    plt.plot(spot,[self.value(s=i,**kwargs) for i in spot],label='Value')
-                    plt.plot(spot,[self.value(s=i,k=k,r=r,sigma=sigma,t=1e-6) for i in spot],label='Payoff at Expiration')
+                    plt.plot(spot,self.value(s=spot,**kwargs),label='Value')
+                    plt.plot(spot,self.value(s=spot,k=k,r=r,sigma=sigma,t=1e-6),label='Payoff at Expiration')
                 elif var == 'pnl':
                     cost = self.value()
-                    plt.plot(spot,[self.value(s=i,**kwargs) - cost for i in spot],label='Value')
-                    plt.plot(spot,[self.value(s=i,k=k,r=r,sigma=sigma,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
+                    plt.plot(spot,self.value(s=spot,**kwargs) - cost,label='Value')
+                    plt.plot(spot,self.value(s=spot,k=k,r=r,sigma=sigma,t=1e-6) - cost,label='Payoff at Expiration')
                 else:
-                    plt.plot(spot,[getattr(self,var)(s=i,**kwargs) for i in spot])
+                    plt.plot(spot,getattr(self,var)(s=spot,**kwargs))
 
                 if var == 'pnl':
                     plt.title('P&L')
@@ -660,6 +662,414 @@ class BSOption(Option):
             output = interactive_plot.children[-1]
             output.layout.height = '450px'
             return interactive_plot
+
+class MCOption(Option):
+    '''Implementation of a Monte-Carlo option pricing model
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `qty`: the number of contracts (sign implies a long or short position)
+    `N`: the number of steps in each simulation
+    `M`: the number of simulations
+    `control`: the type of control variate to use. Either \'antithetic\', \'delta\', or \'None\'
+    '''
+    params = ['s','k','t','sigma','r','type','qty','N','M','control']
+    
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=1_000_000,control=[],**kwargs):
+        super().__init__()
+        for key, val in kwargs.items():
+            setattr(self,key,val)
+        self.s = s
+        self.k = k
+        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+            self.t = self.date_to_t(t)
+        else:
+            self.t = t
+        self.sigma = sigma
+        self.r = r
+        self.qty = qty
+        self.N = N
+        self.M = int(M)
+        if isinstance(control,str):
+            self.control = [control]
+            if control == 'all':
+                self.control = ['antithetic','delta','gamma']
+        else:
+            self.control = control
+        self.pos = 'long' if qty > 0 else 'short'
+        if type not in self.valid_types.keys():
+            raise ValueError('`type` must be call, C, put, or P')
+        else:
+            self.type = self.valid_types.get(type)
+        self.default_params = {param:self.__dict__.get(param) for param in self.params}
+        self.deriv = scipy.misc.derivative
+        self.norm_cdf = scipy.stats.norm.cdf
+        self.norm_pdf = scipy.stats.norm.pdf
+
+    def __neg__(self):
+        return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=-self.qty, N=self.N, M=self.M, control=self.control)
+
+    def __add__(self,other):
+        return OptionPortfolio(self,other)
+
+    def __sub__(self,other):
+        return OptionPortfolio(self,-other)
+
+    def __mul__(self,amount: int):
+       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control)
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} MonteCarloOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type}, qty={self.qty}, N={self.N}, M={self.M})'
+
+    def reset_params(self):
+        for param in self.params:
+            self.__dict__[param] = self.default_params[param]
+
+    def bs_delta(self, s=None, t=None):
+        if s is None:
+            s = self.s
+        if t is None:
+            t = self.t
+        d1 = (np.log(s/self.k) + (self.r + (0.5*self.sigma**2))*t)/(self.sigma*np.sqrt(t))
+        if self.type == 'call':
+            return self.norm_cdf(d1,0,1)
+        else:
+            return -self.norm_cdf(-d1,0,1)
+
+    def bs_gamma(self,s=None,t=None):
+        d1 = (np.log(s/self.k) + (self.r + 0.5*self.sigma**2)*t)/(self.sigma*np.sqrt(t))
+        return np.exp(-self.r*t)*self.norm_pdf(d1,0,1)/(s*self.sigma*np.sqrt(t))
+
+    def evaluate(self,st,k,cv_d=None):
+        if 'delta' in self.control:
+            self.beta1 = -1
+            self.beta2 = -0.5
+            rdt = np.exp(self.r*(self.t/self.N))
+            delta_St = self.bs_delta(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
+            cv_d = np.cumsum(delta_St*(st[1:] - st[:-1]*rdt), axis = 0)
+            cv_g = [0]
+            if self.type == 'C':
+                return np.maximum(st[-1] - k, 0) + self.beta1*cv_d[-1]
+            else:
+                return np.maximum(k - st[-1],0) + self.beta1*cv_d[-1]
+        elif 'gamma' in self.control:
+            if 'delta' not in self.control:
+                self.beta1 = -1
+                cv_d = [0]
+            self.beta2 = -0.5
+            rdt = np.exp(self.r*(self.t/self.N))
+            ergamma = np.exp((2*self.r+self.sigma**2)*self.dt) - 2*rdt + 1
+            gamma_St = self.bs_gamma(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
+            cv_g = np.cumsum(gamma_St*((st[1:] - st[:-1])**2 - ergamma*st[:-1]**2), axis=0)
+        if 'delta' in self.control or 'gamma' in self.control:
+            if self.type == 'C':
+                return np.maximum(st[-1] - k, 0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1]
+            else:
+                return np.maximum(k - st[-1],0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1]
+        else:
+            if self.type == 'C':
+                return np.maximum(st - k,0)
+            else:
+                return np.maximum(k - st,0)
+
+    def simulate(self,**kwargs):
+        if kwargs:
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+
+        self.dt = self.t/self.N
+        nu = self.r - 0.5*self.sigma**2
+        Z = np.random.normal(size=(self.N,self.M))
+        log_S0 = np.log(self.s)
+        log_St_delta = nu*self.dt + self.sigma*np.sqrt(self.dt)*Z
+        log_St = log_S0 + np.cumsum(log_St_delta,axis=0)
+        log_St = np.insert(log_St,0,log_S0,axis=0)
+        St = np.exp(log_St)
+        if 'antithetic' in self.control:
+            log_St_delta_anti = nu*self.dt - self.sigma*np.sqrt(self.dt)*Z
+            log_St_anti = log_S0 + np.cumsum(log_St_delta_anti,axis=0)
+            log_St_anti = np.insert(log_St_anti,0,log_S0,axis=0)
+            St_anti = np.exp(log_St_anti)
+            self.paths = np.array([St, St_anti])
+        else:
+            self.paths = St
+
+        if kwargs:
+            self.reset_params()
+
+    def analytics(self, **kwargs):
+
+        begin = datetime.datetime.now()
+        
+        self.value(**kwargs)
+        
+        end = datetime.datetime.now()
+
+        self.std_err = np.sqrt(np.sum((self.Ct[-1] - self.C0)**2)/(self.M-1)) / np.sqrt(self.M)
+        self.compute_time = (end - begin).microseconds / 1000
+
+        stats_df = pd.DataFrame({'stats':[self.qty*self.C0, self.N, self.M, self.std_err, self.compute_time]},index=['Value','N (steps)','M (simulations)','Std. Err.','Compute Time (ms)'])
+
+        if kwargs:
+            self.reset_params()
+
+        return stats_df
+        
+    def value(self, **kwargs):
+        if kwargs:
+            np.random.seed(0)
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+            self.M = int(self.M)
+
+        if isinstance(self.s,(list,tuple,np.ndarray)):
+            x = kwargs.pop('s')
+            result = np.array([self.value(s=spot, **kwargs) for spot in x])
+            if kwargs:
+                self.reset_params()
+            return result
+
+        self.simulate()
+        if 'antithetic' in self.control:
+            self.Ct = (self.evaluate(self.paths[0],self.k) + self.evaluate(self.paths[1],self.k)) / 2
+        else:
+            self.Ct = self.evaluate(self.paths,self.k)
+
+        if 'delta' not in self.control:
+            self.C0 = np.exp(-self.r*self.t)*self.Ct[-1].mean()
+        else:
+            self.C0 = np.exp(-self.r*self.t)*np.sum(self.Ct)/self.M
+
+
+        if kwargs:
+            self.reset_params()
+
+        return self.C0*self.qty
+
+    def delta(self, **kwargs):
+        if kwargs:
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+
+        result = self.deriv(lambda x: self.value(s=x), self.s, dx=1e-6)
+
+        if kwargs:
+            self.reset_params()
+
+        return result
+
+    def gamma(self, **kwargs):
+        if kwargs:
+            np.random.seed(0)
+
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+
+        result = self.deriv(lambda x: self.delta(s=x), self.s, dx=1e-6)
+
+        if kwargs:
+            self.reset_params()
+
+        return result
+
+    def vega(self, **kwargs):
+        if kwargs:
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-6)
+
+        if kwargs:
+            self.reset_params()
+
+        return result / 100
+
+    def plot(self, var='pnl', resolution=25, **kwargs):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'payoff\', \'pnl\', or \'paths\'.'''
+        variables = {'value','delta','pnl','payoff','paths','gamma','vega'}
+
+        if var not in variables: 
+            raise ValueError('`var` must be either value, delta, payoff, pnl')
+
+        
+        if var == 'paths':
+            if not hasattr(self,'paths'):
+                self.simulate()
+            if 'antithetic' in self.control:
+                plt.plot(self.paths[1],color='gray',alpha=0.025)
+                plt.plot(self.paths[0],color='blue',alpha=0.025)
+            else:
+                plt.plot(self.paths,color='blue',alpha=0.025)
+            plt.title('Simulated Stock Paths')
+            plt.xlabel('Time')
+            plt.ylabel('Price')
+            plt.show()
+        else:
+            spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
+            if var == 'payoff':
+                vals = [self.value(s=i,t=1e-6) for i in spot]
+            elif var == 'pnl':
+                cost = self.value()
+                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+            elif var == 'value':
+                vals = [self.value(s=i) for i in spot]
+            else:
+                vals = [getattr(self,var)(s=i) for i in spot]
+
+            plt.plot(spot,vals)
+            
+            if var == 'pnl':
+                plt.title('P&L')
+            else:
+                plt.title(var.capitalize())
+            plt.axhline(0,color='black')
+            if hasattr(self,'barrier'):
+                plt.axvline(self.barrier,linestyle='--',color='gray',alpha=0.7)
+            plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
+            plt.show()
+   
+class BarrierOption(MCOption, BinomialOption):
+    '''Class for pricing barrier options with the Monte-Carlo or Binomial Tree option pricing models
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `barrier`: the barrier price
+    `barrier_type`: the type of barrier, \'KI\' for knock-in, \'KO\' for knock-out
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `method`: either \'MC\' or \'Binomial\' for Monte-Carlo or Binomial Tree
+    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
+    `qty`: the number of contracts (sign implies a long or short position)
+    `n`: the number of periods to use in the binomial tree
+    `N`: the number of periods to simulate in the Monte-Carlo method
+    `M`: the number of simulations to run in the Monte-Carlo method
+    `control`: either \'antithetic\' or \'delta\' or None for the control variates of the Monte-Carlo method
+    '''
+
+    valid_barriers = {
+        'ki':'KI',
+        'ko':'KO',
+        'knockin':'KI',
+        'knockout':'KO'
+    }
+
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1, method='mc',barrier=120, barrier_type='KI', **kwargs):
+        self.kwargs = kwargs
+        self.method = method.lower()
+        if self.method == 'mc':
+            self.control = kwargs.get('control',[])
+            self.M = int(kwargs.get('M')) or int(self.M)
+            self.N = int(kwargs.get('N')) or int(self.N)
+            super(MCOption,self).__init__()
+        else:
+            super(BinomialOption,self).__init__()
+            self.n = int(kwargs.get('n')) or int(self.n)
+        self.s = s
+        self.k = k
+        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+            self.t = self.date_to_t(t)
+        else:
+            self.t = t
+        self.sigma = sigma
+        self.r = r
+        self.qty = qty
+        self.pos = 'long' if qty > 0 else 'short'
+        if type not in self.valid_types.keys():
+            raise ValueError('`type` must be call, C, put, or P')
+        else:
+            self.type = self.valid_types.get(type)
+        self.barrier = barrier
+        if barrier_type.lower() not in self.valid_barriers.keys():
+            raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
+        else:
+            self.barrier_type = self.valid_barriers.get(barrier_type.lower())
+
+        self.deriv = scipy.misc.derivative
+        self.norm_cdf = scipy.stats.norm.cdf
+        self.default_params = {param:self.__dict__.get(param) for param in self.params}
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, method={self.method})'
+
+    def __neg__(self):
+        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=-self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+    
+    def __mul__(self,amount):
+        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+
+    def __add__(self,other):
+        return OptionPortfolio(self,other)
+
+    def __sub__(self,other):
+        return OptionPortfolio(self,-other)
+
+    def evaluate(self,st,k,cv_d=None):
+        if 'delta' in self.control:
+            self.beta1 = -1
+            self.beta2 = -0.5
+            rdt = np.exp(self.r*(self.t/self.N))
+            delta_St = self.bs_delta(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
+            cv_d = np.cumsum(delta_St*(st[1:] - st[:-1]*rdt), axis = 0)
+            cv_g = [0]
+            if self.type == 'C':
+                return np.maximum(st[-1] - k, 0) + self.beta1*cv_d[-1]
+            else:
+                return np.maximum(k - st[-1],0) + self.beta1*cv_d[-1]
+        elif 'gamma' in self.control:
+            if 'delta' not in self.control:
+                self.beta1 = -1
+                cv_d = [0]
+            self.beta2 = -0.5
+            rdt = np.exp(self.r*(self.t/self.N))
+            ergamma = np.exp((2*self.r+self.sigma**2)*self.dt) - 2*rdt + 1
+            gamma_St = self.bs_gamma(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
+            cv_g = np.cumsum(gamma_St*((st[1:] - st[:-1])**2 - ergamma*st[:-1]**2), axis=0)
+        if 'delta' in self.control or 'gamma' in self.control:
+            if self.barrier_type == 'KI':
+                if self.type == 'C':
+                    return(np.maximum((st[-1] - k), 0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1])*(st[-1] >= self.barrier)
+                elif self.type == 'P':
+                    return (np.maximum((k - st[-1]),0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1])*(st[-1] <= self.barrier)
+            if self.barrier_type == 'KO':
+                if self.type == 'C':
+                    return (np.maximum((st[-1] - k), 0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1])*(st[-1] < self.barrier)
+                elif self.type == 'P':
+                    return (np.maximum((k - st[-1]),0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1])*(st[-1] > self.barrier)
+        else:
+            if self.barrier_type == 'KI':
+                if self.type == 'C':
+                    return np.maximum((st - k),0)*(st >= self.barrier)
+                elif self.type == 'P':
+                    return np.maximum((k - st),0)*(st <= self.barrier)
+            elif self.barrier_type == 'KO':
+                if self.type == 'C':
+                    return np.maximum((st - k),0)*(st < self.barrier)
+                elif self.type == 'P':
+                    return np.maximum((k - st),0)*(st > self.barrier)
+
+    # def evaluate(self,st,k):
+    #     if self.control in (None, 'antithetic'):
+    #         if self.barrier_type == 'KI':
+    #             if self.type == 'C':
+    #                 return np.maximum((st - k)*(st >= self.barrier),0)
+    #             elif self.type == 'P':
+    #                 return np.maximum((k - st)*(st <= self.barrier),0)
+    #         elif self.barrier_type == 'KO':
+    #             if self.type == 'C':
+    #                 return np.maximum((st - k)*(st < self.barrier),0)
+    #             elif self.type == 'P':
+    #                 return np.maximum((k - st)*(st > self.barrier),0)
+    #     elif self.control == 'delta':
+    #         if self.type == 'C':
+    #             return np.maximum(st[-1] - k, 0) + self.beta*self.cv[-1]
+    #         else:
+    #             return np.maximum(k - st[-1 ],0)
 
 class DeltaHedge:
     '''Represents a delta hedge of a strategy'''
@@ -684,7 +1094,7 @@ class DeltaHedge:
         # result = (self.qty * kwargs.get('s') - (self.s*self.qty) if kwargs.get('s') else self.qty * self.s) - (self.s*self.qty)
         if kwargs.get('s'):
             result = (
-                ( self.qty * (kwargs.get('s') - self.s))
+                ( self.delta() * (kwargs.get('s') - self.s))
                 + ( self.gamma() * (kwargs.get('s') - self.s)**2)
                 +  ( self.speed() * (kwargs.get('s') - self.s)**3)
                 +  ( self._acceleration * (kwargs.get('s') - self.s)**4)
@@ -870,7 +1280,7 @@ class OptionPortfolio:
             fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3.25*facet_map.get(len(var))[1]))
             for i, ax in enumerate(axs.flatten()):
                 if i < len(var):
-                    ax.plot(spot, [getattr(self,var[i])(s=j) for j in spot])
+                    ax.plot(spot, getattr(self,var[i])(s=spot))
                     ax.set_title(var[i])
                     for k in ks:
                         ax.axvline(k, color='black', linestyle='--', alpha=0.5)
@@ -881,13 +1291,14 @@ class OptionPortfolio:
 
         if (not interactive or var=='payoff') and isinstance(var,str):
             if var == 'payoff':
-                vals = [self.value(s=i,t=1e-6) for i in spot]
+                vals = self.value(s=spot,t=1e-6)
+                # print(vals)
             elif var == 'pnl':
                 cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
-                plt.plot(spot,[self.value(s=i) - cost for i in spot])
-                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+                plt.plot(spot,self.value(s=spot) - cost)
+                vals = self.value(s=spot,t=1e-6) - cost
             else:
-                vals = [getattr(self,var)(s=i) for i in spot]
+                vals = getattr(self,var)(s=spot)
 
             plt.plot(spot,vals)
             if var == 'pnl':
@@ -903,20 +1314,19 @@ class OptionPortfolio:
             else:
                 plt.show()
         elif interactive and isinstance(var,str):
-            plt.ion()
             def f(t=2):
-                fig, ax = plt.subplots()
+                fig, ax = plt.subplots(figsize=(10,6))
                 if var == 'payoff':
-                    ax.plot(spot,[self.value(s=i,t=t) for i in spot],label='Value')
-                    ax.plot(spot,[self.value(s=i,t=1e-6) for i in spot],label='Payoff at Expiration')
+                    ax.plot(spot,self.value(s=spot,t=t),label='Value')
+                    ax.plot(spot,self.value(s=spot,t=1e-6),label='Payoff at Expiration')
                     ax.legend()
                 elif var == 'pnl':
                     cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
-                    ax.plot(spot,[self.value(s=i,t=t) - cost for i in spot],label='Value')
-                    ax.plot(spot,[self.value(s=i,t=1e-6) - cost for i in spot],label='Payoff at Expiration')
+                    ax.plot(spot,self.value(s=spot,t=t) - cost,label='Value')
+                    ax.plot(spot,self.value(s=spot,t=1e-6) - cost,label='Payoff at Expiration')
                     ax.legend()
                 else:
-                    ax.plot(spot,[getattr(self,var)(s=i,t=t) for i in spot])
+                    ax.plot(spot,getattr(self,var)(s=spot,t=t))
 
                 if var == 'pnl':
                     ax.set_title('P&L')
@@ -966,6 +1376,18 @@ class DigitalOption(OptionPortfolio):
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
         return f'{sign}{self.qty} DigitalOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
+
+    def __neg__(self):
+        return DigitalOption(s=self.s,k=self.k,t=self.t,sigma=self.sigma,r=self.r,type=self.type,qty=-self.qty)
+
+    def __add__(self,other):
+        return OptionPortfolio(self,other)
+
+    def __sub__(self,other):
+        return OptionPortfolio(self,-other)
+
+    def __mul__(self,amount):
+        return DigitalOption(s=self.s,k=self.k,t=self.t,sigma=self.sigma,r=self.r,type=self.type,qty=self.qty*amount)
 
 class VolSurface:
     '''Object that retrieves the volatility surface from the market for a given underlying
@@ -1117,4 +1539,7 @@ class GEX:
         plt.show()
 
 if __name__=='__main__':
-    pass
+    digi = DigitalOption(100,80,'01-20-2023',0.3,0.04,type='C')
+    ki_put = BarrierOption(100,100,'01-20-2023',0.3,0.04,type='P',barrier=80,barrier_type='KI',method='MC',control='antithetic',N=1,M=1e5)
+    phoenix = (digi*10 - ki_put)
+    phoenix.plot()
