@@ -5,6 +5,7 @@ import base64
 
 import pandas as pd
 import numpy as np
+import scipy.stats
 import matplotlib.pyplot as plt
 import wallstreet as ws
 
@@ -41,7 +42,7 @@ class CBOE:
         else:
             print("Authentication failed")        
 
-    def convert_exp_shorthand(self,date:str):
+    def convert_exp_shorthand(self,date: str):
         month_map = {
             'jan':1,
             'feb':2,
@@ -81,8 +82,30 @@ class CBOE:
         elif option_type == 'P':
             return -1
 
-    def get_quote(self, ticker, option_type='C'):
-        today = self.today.strftime('%Y-%m-%d')
+    @staticmethod
+    def date_to_t(date, start_date=None):
+        if isinstance(date,str):
+            date = pd.to_datetime(date).date()
+        elif isinstance(date,datetime.datetime):
+            date = date.date()
+
+        today = start_date or pd.Timestamp.today()
+        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+        holidays = us_holidays.holidays(start=today, end=date)
+        dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
+        
+        return dt/252
+
+    def bs_gamma(self, s, k, t, sigma, r):
+        self.norm_pdf = scipy.stats.norm.pdf
+        d1 = (np.log(s/(k*((1+r)**-t))) + ((0.5*sigma**2))*t)/(sigma*(t**0.5))
+        return np.exp(-(d1)**2/2)/np.sqrt(2*np.pi)/(s*sigma*np.sqrt(t))
+
+    def get_quote(self, ticker, option_type='C', date=None):
+        today = date or self.today.strftime('%Y-%m-%d')
+        if isinstance(today,(datetime.date, datetime.datetime)):
+            today = today.strftime('%Y-%m-%d')
+        
         max_exp = (self.today + datetime.timedelta(days=365)).strftime('%Y-%m-%d')
 
         self.stock = ws.Stock(ticker)
@@ -91,13 +114,13 @@ class CBOE:
         max_k = int(spot * 1.3)
 
         url = f'https://api.livevol.com/v1/live/allaccess/market/option-and-underlying-quotes?root={ticker}&option_type={option_type}&date={today}&min_expiry={today}&max_expiry={max_exp}&min_strike={min_k}&max_strike={max_k}&symbol={ticker}'
-        headers = {"Authorization": "Bearer " + self.access_token}
+        headers = {'Authorization': 'Bearer ' + self.access_token}
         data = requests.get(url, headers=headers)
         
         return data
         
-    def get_options(self, ticker, option_type='C'):
-        r = self.get_quote(ticker,option_type)
+    def get_options(self, ticker, option_type='C', date=None):
+        r = self.get_quote(ticker,option_type,date)
         df = pd.DataFrame(r.json().get('options'))
         df['expiry'] = pd.to_datetime(df.expiry)
         df['dealer_pos'] = df.option_type.apply(self.dealer_pos)
@@ -110,5 +133,36 @@ class CBOE:
         )
 
         return df
+            
+    def get_dealer_gamma(self,date,spy_price):
+        month = date.month
+        year = date.year
+        day = date.day
+        underlying_price = spy_price
+
+        opex = self.get_opex_date(month,year)
+        if  opex < date:
+            fwd_date = date + datetime.timedelta(days=30)
+            opex = self.get_opex_date(fwd_date.month,fwd_date.year)
+
+        query = f'exp_month == {opex.month} and exp_year == {opex.year}' if not day else f'exp_month == {opex.month} and exp_year == {opex.year} and exp_day == {opex.day}'
+        calls = self.get_options('SPY','C',date=date)
+        puts = self.get_options('SPY','P',date=date)
+        data = pd.concat([calls,puts])
+        data['as_of'] = date
+        data = data.query(query).sort_values('strike')
+
+        high_interest = data[data.agg_gamma > data.agg_gamma.quantile(0.7)]
+
+        aggs = {}
+        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
+        for index, i in high_interest.iterrows():
+            gams = np.array(self.bs_gamma(s=underlying_price, k=i.strike, t=self.date_to_t(i.expiry.date(),start_date=i.as_of), sigma=i.mid_iv, r=0.02)*i.open_interest*i.dealer_pos*100*underlying_price)
+            aggs.update({i.option:gams})
+
+        agg_gammas = np.nansum(list(aggs.values()), axis=0)
+        # nearest_gamma = np.abs(spot - underlying_price).argmin()
+
+        return agg_gammas
 
     

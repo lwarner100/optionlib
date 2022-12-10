@@ -20,6 +20,7 @@ from cboe import CBOE
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 class Option:
     '''Base class for building other pricing models'''
@@ -299,7 +300,7 @@ class BinomialOption(Option):
         plt.plot(x,ys,'o',markersize=1)
         plt.show()
 
-class BarrierOption1(BinomialOption):
+class BinomialBarrierOption(BinomialOption):
     '''Class for pricing barrier options with the Binomial Tree option pricing model
     `s`: underlying price at T=0 (now)
     `k`: strike price of the option
@@ -584,9 +585,22 @@ class BSOption(Option):
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self, var='pnl', interactive=False, resolution=40, return_ax=False):
+    def plot(self, var='pnl', interactive=False, resolution=40, return_ax=False, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'vanna\' \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
         greeks = {'value','delta','gamma','vega','vanna','rho','theta','pnl','payoff','speed','summary'}
+
+        x = kwargs.get('x')
+        y = kwargs.get('y')
+        if x and y:
+            xs = np.linspace(0, 2*getattr(self,x), resolution)
+            ys = getattr(self,y)(**{x:xs})
+            fig, ax = plt.subplots()
+            ax.plot(xs,ys)
+            ax.set_xlabel(x)
+            if x == 't':
+                ax.invert_xaxis()
+            ax.set_ylabel(y)
+            return ax
 
         if isinstance(var,str) and var not in greeks: 
             raise ValueError('`var` must be either value, delta, gamma, speed, vega, vanna, theta, rho, payoff, pnl, or summary')
@@ -674,11 +688,11 @@ class MCOption(Option):
     `qty`: the number of contracts (sign implies a long or short position)
     `N`: the number of steps in each simulation
     `M`: the number of simulations
-    `control`: the type of control variate to use. Either \'antithetic\', \'delta\', or \'None\'
+    `control`: the type of control variate to use. Either \'antithetic\', \'delta\', \'gamma\', or \'all\'
     '''
     params = ['s','k','t','sigma','r','type','qty','N','M','control']
     
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=1_000_000,control=[],**kwargs):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=1_000_000,control=None,**kwargs):
         super().__init__()
         for key, val in kwargs.items():
             setattr(self,key,val)
@@ -697,6 +711,8 @@ class MCOption(Option):
             self.control = [control]
             if control == 'all':
                 self.control = ['antithetic','delta','gamma']
+        elif control is None:
+            self.control = []
         else:
             self.control = control
         self.pos = 'long' if qty > 0 else 'short'
@@ -889,11 +905,27 @@ class MCOption(Option):
         return result / 100
 
     def plot(self, var='pnl', resolution=25, **kwargs):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'payoff\', \'pnl\', or \'paths\'.'''
-        variables = {'value','delta','pnl','payoff','paths','gamma','vega'}
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'payoff\', \'pnl\', \'analytics\', or \'paths\'.'''
+        variables = {'value','delta','pnl','payoff','paths','gamma','vega','analytics'}
 
         if var not in variables: 
             raise ValueError('`var` must be either value, delta, payoff, pnl')
+
+        if var == 'analytics':
+            value = self.analytics().loc['Value'].values[0]
+            bs_value = BSOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=self.qty).value()
+            fig, ax = plt.subplots()
+            c_T = np.column_stack(self.Ct)[-1] if 'antithetic' in self.control else self.Ct[-1]
+            sn.kdeplot(c_T, ax=ax)
+            ax.axvline(x=bs_value, color='blue', linestyle='-', label='Black-Scholes Value')
+            ax.axvline(x=value, color='gray', linestyle='--', label='Estimated Value')
+            ax.text(value*1.2, 0.8*ax.get_ylim()[1], f'Estimated Value: {round(value,2)}')
+            ax.text(bs_value*1.2, 0.7*ax.get_ylim()[1], f'Black-Scholes Value: {round(bs_value,2)}',color='blue')
+            ax.axvspan(value-self.std_err, value+self.std_err, alpha=0.2, color='gray')
+            ax.set_title(f'Analytics | Std. Err.: {round(self.std_err,6)} | Compute Time: {round(self.compute_time,2)} ms')
+            ax.set_xlabel('Option Value')
+            ax.legend()
+            return ax
 
         
         if var == 'paths':
@@ -1052,24 +1084,6 @@ class BarrierOption(MCOption, BinomialOption):
                     return np.maximum((st - k),0)*(st < self.barrier)
                 elif self.type == 'P':
                     return np.maximum((k - st),0)*(st > self.barrier)
-
-    # def evaluate(self,st,k):
-    #     if self.control in (None, 'antithetic'):
-    #         if self.barrier_type == 'KI':
-    #             if self.type == 'C':
-    #                 return np.maximum((st - k)*(st >= self.barrier),0)
-    #             elif self.type == 'P':
-    #                 return np.maximum((k - st)*(st <= self.barrier),0)
-    #         elif self.barrier_type == 'KO':
-    #             if self.type == 'C':
-    #                 return np.maximum((st - k)*(st < self.barrier),0)
-    #             elif self.type == 'P':
-    #                 return np.maximum((k - st)*(st > self.barrier),0)
-    #     elif self.control == 'delta':
-    #         if self.type == 'C':
-    #             return np.maximum(st[-1] - k, 0) + self.beta*self.cv[-1]
-    #         else:
-    #             return np.maximum(k - st[-1 ],0)
 
 class DeltaHedge:
     '''Represents a delta hedge of a strategy'''
@@ -1515,7 +1529,7 @@ class GEX:
 
         aggs = {}
         underlying_price = self.spy.price
-        spot = np.linspace(300,500,50)
+        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
         for i in high_interest.iterrows():
             i = i[1]
             option = BSOption(
@@ -1529,12 +1543,19 @@ class GEX:
             gams = np.array([option.gamma(s=x)*i.open_interest*i.dealer_pos*100*underlying_price for x in spot])
             aggs.update({i.option:gams})
 
+        agg_gammas = np.nansum(list(aggs.values()), axis=0)
+        nearest_gamma = np.abs(spot - underlying_price).argmin()
         fig, ax = plt.subplots(figsize=(10,6))
-        ax.plot(spot,sum(aggs.values()))
+        ax.plot(spot, agg_gammas, label='Dealer Gamma')
+        ax.set_xlim(spot[0],spot[-1])
+        ax.vlines(underlying_price,0,agg_gammas[nearest_gamma],linestyle='--',color='gray')
+        ax.hlines(agg_gammas[nearest_gamma],spot[0],underlying_price,linestyle='--',color='gray')
+        ax.plot(underlying_price, agg_gammas[nearest_gamma], 'o', color='black', label='Spot')
         ax.set_title(f'Dealer Gamma Exposure for {date.strftime("%m-%d-%Y")}')
         ax.set_xlabel('Strike')
         ax.set_ylabel('Gamma Exposure')
         ax.axhline(0,color='black')
+        ax.legend()
         ax.grid()
         plt.show()
 
