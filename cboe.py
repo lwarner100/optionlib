@@ -2,6 +2,7 @@ import os
 import requests
 import datetime
 import base64
+import json
 
 import pandas as pd
 import numpy as np
@@ -9,15 +10,15 @@ import scipy.stats
 import matplotlib.pyplot as plt
 import wallstreet as ws
 
-if os.path.exists('credentials.txt'):
-    with open('credentials.txt', 'r') as f:
-        credentials = f.read().splitlines()
+if os.path.exists('credentials.json'):
+    with open('credentials.json', 'r') as f:
+        credentials = json.load(f).get('accounts')[0]
 else:
-    credentials = [None, None]
+    credentials = {}
 
 class CBOE:
 
-    def __init__(self, CLIENT_ID=credentials[0], CLIENT_SECRET=credentials[1]):
+    def __init__(self, CLIENT_ID=credentials.get('client_id'), CLIENT_SECRET=credentials.get('client_secret')):
         if not CLIENT_ID and not CLIENT_SECRET:
             raise ValueError('Could not read credentials from local credentials.txt. Please input valid credentials as arguments.')
 
@@ -40,7 +41,7 @@ class CBOE:
             if not len(self.access_token) > 0:
                 print('Authentication failed')
         else:
-            print("Authentication failed")        
+            print("Authentication failed:",token_data.content)        
 
     def convert_exp_shorthand(self,date: str):
         month_map = {

@@ -454,7 +454,7 @@ class BSOption(Option):
         return self.value()
 
     def delta(self,**kwargs):
-        '''dC / ds'''
+        '''dValue / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
         
@@ -469,7 +469,7 @@ class BSOption(Option):
         
     
     def gamma(self,**kwargs):
-        '''d^2C / ds^2 or dDelta / ds'''
+        '''d^2Value / ds^2 or dDelta / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -481,7 +481,7 @@ class BSOption(Option):
         return self.qty*result
 
     def speed(self,**kwargs):
-        '''d^3C / ds^3 or dGamma / ds'''
+        '''d^3Value / ds^3 or dGamma / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -493,7 +493,7 @@ class BSOption(Option):
         return self.qty*result
 
     def acceleration(self,**kwargs):
-        '''d^4C / ds^4 or dSpeed / ds'''
+        '''d^4Value / ds^4 or dSpeed / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -517,7 +517,7 @@ class BSOption(Option):
         return self.qty*result
 
     def vega(self,**kwargs):
-        '''dC / dSigma'''
+        '''dValue / dSigma'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -529,7 +529,7 @@ class BSOption(Option):
         return self.qty*result
 
     def vanna(self,**kwargs):
-        '''d^2C / ds dSigma or dVega / ds'''
+        '''d^2Value / ds dSigma or dVega / ds'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -541,7 +541,7 @@ class BSOption(Option):
         return self.qty*result
 
     def theta(self,**kwargs):
-        '''-dC / dt'''
+        '''-dValue / dt'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -555,7 +555,7 @@ class BSOption(Option):
         return self.qty*result
 
     def rho(self,**kwargs):
-        '''dC / dr'''
+        '''dValue / dr'''
         for key, val in kwargs.items():
             self.__dict__[key] = val
 
@@ -1329,7 +1329,7 @@ class OptionPortfolio:
                 plt.show()
         elif interactive and isinstance(var,str):
             def f(t=2):
-                fig, ax = plt.subplots(figsize=(10,6))
+                fig, ax = plt.subplots(figsize=(8,4.9))
                 if var == 'payoff':
                     ax.plot(spot,self.value(s=spot,t=t),label='Value')
                     ax.plot(spot,self.value(s=spot,t=1e-6),label='Payoff at Expiration')
