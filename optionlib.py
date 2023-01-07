@@ -60,8 +60,11 @@ class Option:
         us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
         holidays = us_holidays.holidays(start=today, end=date)
         dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
-        
         return dt/252
+
+    def implied_volatility(self, price):
+        f = lambda x: self.value(sigma = x) - price
+        return scipy.optimize.newton(f, 0.3)
 
 class BinomialOption(Option):
     '''Implementation of the Binomial Tree option pricing model
@@ -75,7 +78,7 @@ class BinomialOption(Option):
     `n`: the number of periods to use in the binomial tree
     `qty`: the number of contracts (sign implies a long or short position)
     '''
-    params = ['s','k','t','sigma','r','type','tree','style','n','qty']
+    params = ['s','k','t','sigma','r','type','style','n','qty','tree']
 
     def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=50, qty: int = 1):
         super().__init__()
@@ -100,6 +103,8 @@ class BinomialOption(Option):
         else:
             self.style = self.valid_styles.get(style)
 
+        self.deriv = scipy.misc.derivative
+
         self.get_secondary_params()
 
         self.default_params = {param:self.__dict__.get(param) for param in self.params}
@@ -121,12 +126,15 @@ class BinomialOption(Option):
     def __mul__(self,amount: int):
         return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
 
+    def __rmul__(self,amount: int):
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
+
     def reset_params(self):
         for param in self.params:
             self.__dict__[param] = self.default_params[param]
             self.get_secondary_params()
-            if hasattr(self,'val_tree'):
-                delattr(self,'val_tree')
+        delattr(self,'tree')
+        delattr(self,'value_tree')
     
     def get_secondary_params(self):
         self.dt = self.t / self.n
@@ -134,17 +142,18 @@ class BinomialOption(Option):
         self.up = np.exp(self.sigma*np.sqrt(self.dt))
         self.dn = 1/self.up
         self.pi = (self.r_hat - self.dn)/(self.up - self.dn)
-        self.tree = self.create_tree()
+        self.create_tree()
+        self.create_value_tree()
 
     def summary(self):
         data = {
-                '':['price','delta','gamma','vega',''],
-                ' ':[self.value(),self.delta(),self.gamma(),self.vega(),'']
+                '':['price','delta','gamma','vega','theta','rho'],
+                ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        df2 = pd.DataFrame({' ':['S','K','IV','t','r'],'':[self.s,self.k,self.sigma,self.t,self.r]})
+        df2 = pd.DataFrame({' ':['S','K','IV','t','r',''],'':[self.s,self.k,self.sigma,self.t,self.r,'']})
 
-        summary_df = pd.concat({'greeks':df,'parameters':df2},axis=1)
+        summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
     def evaluate(self,price):
@@ -159,8 +168,7 @@ class BinomialOption(Option):
             val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
         return val
 
-
-    def create_tree(self):
+    def create_list_tree(self):
         tree = [[0]]
         for period in range(self.n):
             layer = []
@@ -171,40 +179,40 @@ class BinomialOption(Option):
         tree = [[self.s*(self.up**node) for node in layer] for layer in tree]
         return tree
 
-    def create_val_tree(self,val_tree=None):
-        if val_tree is None:
-            val_tree = [[self.evaluate(node) for node in self.tree[-1]]]
-
-        tree_idx = -len(val_tree)-1
-        layer = []
-        for i, price in enumerate(self.tree[tree_idx]):
-            Vu = val_tree[-1][i]
-            Vd = val_tree[-1][i+1]
-            layer.append(self.node_eval(price,Vu,Vd))
-
-        val_tree.append(layer)
+    def create_tree(self):
+        self.tree = np.zeros((self.n+1,self.n+1))
+        self.tree[0,0] = self.s
+        for i in range(1,self.n+1):
+            self.tree[i,0] = self.tree[i-1,0]*self.up
+            self.tree[i,1:] = self.tree[i-1,:-1]*self.dn
+    
+    def create_value_tree(self):
+        if not hasattr(self,'tree'):
+            self.create_tree()
         
-        if len(val_tree[-1]) != 1:
-            self.create_val_tree(val_tree)
+        self.value_tree = np.zeros_like(self.tree)
+        self.value_tree[0,:] = np.maximum(self.tree[-1,:]-100,0)[::-1]
+        self.value_tree[1,:-1] = (1/self.r_hat)*((self.pi*self.value_tree[0,1:])+(1-self.pi)*self.value_tree[0,:-1])
+        
+        for i in range(2,self.value_tree.shape[0]):
+            self.value_tree[i,:-i] = (1/self.r_hat)*((self.pi*self.value_tree[i-1,1:-i+1])+(1-self.pi)*self.value_tree[i-1,:-i])
 
-        self.val_tree = val_tree
-
-    def value(self,**kwargs):
+        
+    def value(self, **kwargs):
         if kwargs:
             for key, val in kwargs.items():
                 self.__dict__[key] = val
-                self.get_secondary_params()
-                self.create_val_tree()
-
-        if not hasattr(self,'val_tree'):
-            self.create_val_tree()
+            self.get_secondary_params()
         
-        result = self.val_tree[-1][0]
+        elif not hasattr(self,'value_tree'):
+            self.create_value_tree()
+
+        result = self.value_tree[-1,0]
 
         if kwargs:
             self.reset_params()
-
-        return self.qty*result
+        
+        return result 
 
     def price(self):
         return self.value()
@@ -217,59 +225,64 @@ class BinomialOption(Option):
         if kwargs:
             for key, val in kwargs.items():
                 self.__dict__[key] = val
-                self.get_secondary_params()
-                self.create_val_tree()
-        elif not hasattr(self,'val_tree'):
-            self.create_val_tree()
+            self.get_secondary_params()
+        
+        elif not hasattr(self,'value_tree'):
+            self.create_value_tree()
 
-        layer = self.val_tree[-2]
-        result = (layer[0]-layer[1])/(self.s*(self.up-self.dn))
+        layer = self.value_tree[-2]
+        result = (layer[1]-layer[0]) / (self.s*(self.up-self.dn))
 
         if kwargs:
             self.reset_params()
 
         return self.qty*result
 
-    def gamma(self,precision=1e-4):
-        result =  (self.delta(s=self.s+precision) - self.delta(s=self.s-precision))/(2*precision)
+    def gamma(self, **kwargs):
+        s = kwargs.get('s')
+        s_diff = 0
+        if s:
+            s_diff = self.s - s
+
+        result = self.deriv(lambda x: self.delta(s=x+s_diff), self.s+s_diff, dx=1e-6)
+
         return self.qty*result
 
-    def vega(self,precision=1e-4):
-        result =  (self.value(sigma=self.sigma+precision) - self.value(sigma=self.sigma-precision))/(100*precision)
-        return self.qty*result
+    def vega(self, **kwargs):
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-6)
 
-    def theta(self,precision=1e-4):
-        '''Poor approximation of theta, avoid using'''
-        result =  -(self.value(t=self.t+precision) - self.value(t=self.t-precision))/(2*precision)
-        return self.qty*result / 365
-
-    def rho(self,precision=1e-4):
-        '''Poor approximation of rho, avoid using'''
-        result =  (self.value(r=self.r+precision) - self.value(r=self.r-precision))/(2*precision)
         return self.qty*result / 100
 
-    def plot(self,var='value',resolution=40, return_ax=False, **kwargs):
-        '''`var` must be either \'value\', \'delta\', \'payoff\', \'pnl\''''
-        greeks = {'value','delta','pnl','payoff'}
-        if kwargs.get('n'):
-            n = kwargs.get('n')
-        else:
-            n = self.n
+    def theta(self, **kwargs):
+        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-6)
+
+        return self.qty*result / 365
+
+    def rho(self, **kwargs):
+        result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-6)
+        
+        return self.qty*result / 100
+
+    def plot(self,var='value',resolution=40, **kwargs):
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or  \'pnl\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
+        if kwargs:
+            for key, val in kwargs.items():
+                self.__dict__[key] = val
+            self.get_secondary_params()
 
         if var not in greeks: 
-            raise ValueError('`var` must be either value, delta, payoff, pnl')
+            raise ValueError('`var` must be either value, delta, gamma, vega, theta, rho, payoff, pnl')
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
 
         if var == 'payoff':
-            vals = [self.value(s=i,t=1e-6,n=n) for i in spot]
+            vals = [self.value(s=x,t=1e-6) for x in spot]
         elif var == 'pnl':
             cost = self.value()
-            vals = [self.value(s=i,t=1e-6,n=n) - cost for i in spot]
-        elif var == 'value':
-            vals = [self.value(s=i,n=n) for i in spot]
-        elif var == 'delta':
-            vals = [self.delta(s=i,n=n) for i in spot]
+            vals = [self.value(s=x,t=1e-6) for x in spot] - cost
+        else:
+            vals = [getattr(self,var)(s=x) for x in spot]
 
         plt.plot(spot,vals)
         if var == 'pnl':
@@ -279,22 +292,21 @@ class BinomialOption(Option):
         plt.axhline(0,color='black')
         plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
 
-        if return_ax:
-            return plt.gca()
-        else:
-            plt.show()
+        if kwargs:
+            self.reset_params()
 
 
     def plot_dist(self):
         sn.kdeplot(np.concatenate(self.tree),fill=True)
 
     def show_tree(self):
+        tree = self.create_list_tree()
         x = []
-        for i in range(len(self.tree)):
-            x += [i]*len(self.tree[i])
+        for i in range(len(tree)):
+            x += [i]*len(tree[i])
 
         ys = []
-        for i in self.tree:
+        for i in tree:
             ys += i
 
         plt.plot(x,ys,'o',markersize=1)
@@ -334,46 +346,46 @@ class BinomialBarrierOption(BinomialOption):
         return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
 
     def evaluate(self,price):
+        combos = {
+            'C':{
+                'KI':price >= self.barrier,
+                'KO':price < self.barrier
+            },
+            'P':{
+                'KI':price <= self.barrier,
+                'KO':price > self.barrier
+            }
+            }
+
         val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
-        if self.type == 'C':
-            if self.barrier_type == 'KO':
-                if price >= self.barrier:
-                    val = 0
-            elif self.barrier_type == 'KI':
-                if price <= self.barrier:
-                    val = 0
-        elif self.type == 'P':
-            if self.barrier_type == 'KO':
-                if price <= self.barrier:
-                    val = 0
-            elif self.barrier_type == 'KI':
-                if price >= self.barrier:
-                    val = 0
+        val *= combos[self.type][self.barrier_type]
+        
+
         return val
 
     def node_eval(self,price,Vu,Vd):
+        combos = {
+            'C':{
+                'KI':price >= self.barrier,
+                'KO':price < self.barrier
+            },
+            'P':{
+                'KI':price <= self.barrier,
+                'KO':price > self.barrier
+            }
+            }
+
         intrinsic_value = price - self.k if self.type == 'C' else self.k - price
-        if self.type == 'C':
-            if self.barrier_type == 'KO':
-                if price >= self.barrier:
-                    intrinsic_value = 0
-            elif self.barrier_type == 'KI':
-                if price <= self.barrier:
-                    intrinsic_value = 0
-        elif self.type == 'P':
-            if self.barrier_type == 'KO':
-                if price <= self.barrier:
-                    intrinsic_value = 0
-            elif self.barrier_type == 'KI':
-                if price >= self.barrier:
-                    intrinsic_value = 0
+        intrinsic_value *= combos[self.type][self.barrier_type]
+
+
         
         if self.style == 'A':
             val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
         else:
             val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
         
-        return val
+        return val    
 
 class BSOption(Option):
     '''Implementation of the Black-Scholes option pricing model
@@ -421,6 +433,9 @@ class BSOption(Option):
     def __mul__(self,amount: int):
         return BSOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=self.qty*amount)
 
+    def __rmul__(self,amount: int):
+        return BSOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=self.qty*amount)
+
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
         return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
@@ -445,6 +460,8 @@ class BSOption(Option):
             result = self.k*((1+self.r)**-self.t)*self.norm_cdf(-self.d2()) - self.s*self.norm_cdf(-self.d1())
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -463,6 +480,8 @@ class BSOption(Option):
             result -= 1
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -476,6 +495,8 @@ class BSOption(Option):
         result = np.exp(-(self.d1())**2/2)/np.sqrt(2*np.pi)/(self.s*self.sigma*np.sqrt(self.t))
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -488,6 +509,8 @@ class BSOption(Option):
         result = -(self.gamma() / self.s) * ((self.d1() / (self.sigma * np.sqrt(self.t))) + 1)
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -512,6 +535,8 @@ class BSOption(Option):
         result = self.deriv(lambda x: self.acceleration(s=x), self.s, dx=1e-6, n=1)
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -524,6 +549,8 @@ class BSOption(Option):
         result = self.s*np.exp(-(self.d1())**2/2)/np.sqrt(2*np.pi)*np.sqrt(self.t)/100
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -536,6 +563,8 @@ class BSOption(Option):
         result = (self.vega() / self.s) * (1 - (self.d1() / (self.sigma * np.sqrt(self.t))))
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result
@@ -552,6 +581,11 @@ class BSOption(Option):
 
         result = result/365
 
+        if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
+            self.reset_params()
+
         return self.qty*result
 
     def rho(self,**kwargs):
@@ -565,14 +599,11 @@ class BSOption(Option):
             result = -self.k * self.t * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(-self.d2())
 
         if kwargs:
+            if len(result.shape) > 1:
+                result = np.diag(result)
             self.reset_params()
 
         return self.qty*result / 100
-
-    def values(self):
-        spot = np.linspace(self.k*0.85,self.k*1.15,80)
-        vals = np.array([self.value(s=i,t=1e-6) for i in spot])
-        return vals
 
     def summary(self):
         data = {
@@ -735,6 +766,9 @@ class MCOption(Option):
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
+       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control)
+
+    def __rmul__(self,amount: int):
        return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control)
 
     def __repr__(self):
@@ -1034,6 +1068,9 @@ class BarrierOption(MCOption, BinomialOption):
     
     def __mul__(self,amount):
         return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+    
+    def __rmul__(self,amount):
+        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -1042,6 +1079,17 @@ class BarrierOption(MCOption, BinomialOption):
         return OptionPortfolio(self,-other)
 
     def evaluate(self,st,k,cv_d=None):
+        combos = {
+                    'C':{
+                        'KI':st >= self.barrier,
+                        'KO':st < self.barrier
+                    },
+                    'P':{
+                        'KI':st <= self.barrier,
+                        'KO':st > self.barrier
+                    }
+                }
+
         if 'delta' in self.control:
             self.beta1 = -1
             self.beta2 = -0.5
@@ -1053,6 +1101,7 @@ class BarrierOption(MCOption, BinomialOption):
                 return np.maximum(st[-1] - k, 0) + self.beta1*cv_d[-1]
             else:
                 return np.maximum(k - st[-1],0) + self.beta1*cv_d[-1]
+
         elif 'gamma' in self.control:
             if 'delta' not in self.control:
                 self.beta1 = -1
@@ -1062,6 +1111,7 @@ class BarrierOption(MCOption, BinomialOption):
             ergamma = np.exp((2*self.r+self.sigma**2)*self.dt) - 2*rdt + 1
             gamma_St = self.bs_gamma(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
             cv_g = np.cumsum(gamma_St*((st[1:] - st[:-1])**2 - ergamma*st[:-1]**2), axis=0)
+            
         if 'delta' in self.control or 'gamma' in self.control:
             if self.barrier_type == 'KI':
                 if self.type == 'C':
@@ -1084,6 +1134,11 @@ class BarrierOption(MCOption, BinomialOption):
                     return np.maximum((st - k),0)*(st < self.barrier)
                 elif self.type == 'P':
                     return np.maximum((k - st),0)*(st > self.barrier)
+
+        # if 'delta' in self.control or 'gamma' in self.control:
+        #     return (np.maximum((st[-1] - k), 0) + self.beta1*cv_d[-1] + self.beta2*cv_g[-1])*combos[self.type][self.barrier_type][-1]
+        # else:
+        #     return np.maximum((st - k),0)*combos[self.type][self.barrier_type]
 
 class DeltaHedge:
     '''Represents a delta hedge of a strategy'''
@@ -1165,6 +1220,8 @@ class OptionPortfolio:
         if self.delta_hedge:
             self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta(),gamma=-self.gamma(),speed=-self.speed(),acceleration=-self.acceleration())
             self.options.append(self.delta_hedge)
+
+        self.ks = [i.k for i in self.options]
 
 
     def __repr__(self):
@@ -1276,8 +1333,8 @@ class OptionPortfolio:
         if isinstance(var,str) and var not in greeks: 
             raise ValueError('`var` must be either value, delta, gamma, speed, vega, vanna, theta, rho, payoff, pnl, or summary')
 
-        ks = [o.k for o in self.options]
-        spot = np.linspace(min(ks)*(1-xrange),max(ks)*(1+xrange),resolution)
+        spot = np.linspace(min(self.ks)*(1-xrange),max(self.ks)*(1+xrange),resolution)
+        spot = np.sort(np.append(spot, [np.array(self.ks)+1e-4, np.array(self.ks)-1e-4]))
 
         if var == 'summary':
             var = ['value','delta','gamma','vega','theta','rho']
@@ -1296,7 +1353,7 @@ class OptionPortfolio:
                 if i < len(var):
                     ax.plot(spot, getattr(self,var[i])(s=spot))
                     ax.set_title(var[i])
-                    for k in ks:
+                    for k in self.ks:
                         ax.axvline(k, color='black', linestyle='--', alpha=0.5)
                     ax.axhline(0, color='black')
             plt.show()
@@ -1320,7 +1377,7 @@ class OptionPortfolio:
             else:
                 plt.title(var.capitalize())
             plt.axhline(0,color='black')
-            for k in ks:
+            for k in self.ks:
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
 
             if return_ax:
@@ -1347,7 +1404,7 @@ class OptionPortfolio:
                 else:
                     ax.set_title(var.capitalize())
                 ax.axhline(0,color='black')
-                for k in ks:
+                for k in self.ks:
                     ax.axvline(k,linestyle='--',color='gray',alpha=0.7)
                 return ax
 
@@ -1369,9 +1426,10 @@ class DigitalOption(OptionPortfolio):
     '''
 
     def __init__(self, s=100,k=100,t=1,sigma=0.3,r=0.04,type='C',qty=1, precision=1e-6):
+        type_coeff = 1 if type=='C' else -1
         self.components = [
-            BSOption(s=s,k=k+precision,t=t,sigma=sigma,r=r,type=type,qty=-qty),
-            BSOption(s=s,k=k-precision,t=t,sigma=sigma,r=r,type=type,qty=qty),
+            BSOption(s=s,k=k+(type_coeff*precision),t=t,sigma=sigma,r=r,type=type,qty=-qty),
+            BSOption(s=s,k=k-(type_coeff*precision),t=t,sigma=sigma,r=r,type=type,qty=qty),
             ]
         super().__init__(*self.components,mod=precision)
 
@@ -1402,6 +1460,11 @@ class DigitalOption(OptionPortfolio):
 
     def __mul__(self,amount):
         return DigitalOption(s=self.s,k=self.k,t=self.t,sigma=self.sigma,r=self.r,type=self.type,qty=self.qty*amount)
+
+    def __rmul__(self,amount):
+        return DigitalOption(s=self.s,k=self.k,t=self.t,sigma=self.sigma,r=self.r,type=self.type,qty=self.qty*amount)
+
+    
 
 class VolSurface:
     '''Object that retrieves the volatility surface from the market for a given underlying
@@ -1496,6 +1559,7 @@ class GEX:
         self.spy = ws.Stock('SPY')
 
     def get_gex(self,date=None):
+        none_date = date is None
         if date:
             if isinstance(date,str):
                 if 'e' in date:
@@ -1510,20 +1574,26 @@ class GEX:
             year = self.today.year
             day = None
 
-        query = f'exp_month == {month} and exp_year == {year}' if not day else f'exp_month == {month} and exp_year == {year} and exp_day == {day}'
         calls = self.client.get_options('SPY','C')
         puts = self.client.get_options('SPY','P')
         data = pd.concat([calls,puts])
-        return data.query(query).sort_values('strike')
+        if not none_date:
+            query = f'exp_month == {month} and exp_year == {year}' if not day else f'exp_month == {month} and exp_year == {year} and exp_day == {day}'
+            data = data.query(query)
+
+        return data.sort_values('strike')
 
     def plot(self, date=None, quantile=0.7):
+        sequitur = 'for' if date else 'as of'
         if not date:
-            date = (self.today + datetime.timedelta(days=30)).strftime('%m-%Y')
+            str_date = self.today.strftime('%m-%d-%Y')
         elif 'e' in date:
             date = self.client.convert_exp_shorthand(date)
+            str_date = date.strftime('%m-%d-%Y')
         else:
             date = pd.to_datetime(date)
-        
+            str_date = date.strftime('%m-%d-%Y')
+
         gex = self.get_gex(date)
         high_interest = gex[gex.agg_gamma > gex.agg_gamma.quantile(quantile)]
 
@@ -1533,9 +1603,9 @@ class GEX:
         for i in high_interest.iterrows():
             i = i[1]
             option = BSOption(
-                s = self.spy.price,
+                s = underlying_price,
                 k = i.strike,
-                r = 0.02,
+                r = 0.04,
                 t = i.expiry,
                 sigma = i.mid_iv,
                 type = i.option_type
@@ -1551,10 +1621,12 @@ class GEX:
         ax.vlines(underlying_price,0,agg_gammas[nearest_gamma],linestyle='--',color='gray')
         ax.hlines(agg_gammas[nearest_gamma],spot[0],underlying_price,linestyle='--',color='gray')
         ax.plot(underlying_price, agg_gammas[nearest_gamma], 'o', color='black', label='Spot')
-        ax.set_title(f'Dealer Gamma Exposure for {date.strftime("%m-%d-%Y")}')
+        ax.set_title(f'Dealer Gamma Exposure {sequitur} {str_date}')
         ax.set_xlabel('Strike')
         ax.set_ylabel('Gamma Exposure')
         ax.axhline(0,color='black')
+        # add text saying the spot price in black text with white outline to the right of the point
+        ax.text(underlying_price*1.02, agg_gammas[nearest_gamma], f'${underlying_price:,.2f}', ha='left', va='center', color='white', bbox=dict(facecolor='black', alpha=0.5))
         ax.legend()
         ax.grid()
         plt.show()

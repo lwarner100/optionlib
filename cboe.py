@@ -108,7 +108,8 @@ class CBOE:
             today = today.strftime('%Y-%m-%d')
         
         max_exp = (self.today + datetime.timedelta(days=365)).strftime('%Y-%m-%d')
-
+        
+        
         self.stock = ws.Stock(ticker)
         spot = self.stock.price
         min_k = int(spot * 0.7)
@@ -162,8 +163,8 @@ class CBOE:
             aggs.update({i.option:gams})
 
         agg_gammas = np.nansum(list(aggs.values()), axis=0)
-        # nearest_gamma = np.abs(spot - underlying_price).argmin()
+        nearest_gamma = np.abs(spot - underlying_price).argmin()
 
-        return agg_gammas
+        return nearest_gamma
 
     
