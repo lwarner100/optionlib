@@ -136,14 +136,15 @@ class BinomialOption(Option):
         delattr(self,'tree')
         delattr(self,'value_tree')
     
-    def get_secondary_params(self):
+    def get_secondary_params(self,trees=True):
         self.dt = self.t / self.n
         self.r_hat = (1+self.r) ** self.dt
         self.up = np.exp(self.sigma*np.sqrt(self.dt))
         self.dn = 1/self.up
         self.pi = (self.r_hat - self.dn)/(self.up - self.dn)
-        self.create_tree()
-        self.create_value_tree()
+        if trees:
+            self.create_tree()
+            self.create_value_tree()
 
     def summary(self):
         data = {
@@ -157,17 +158,16 @@ class BinomialOption(Option):
         return summary_df
 
     def evaluate(self,price):
-        val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
-        return val
+        result = np.maximum(price-self.k,0) if self.type == 'C' else np.maximum(self.k-price,0)
+        return result
 
-    def node_eval(self,price,Vu,Vd):
-        intrinsic_value = price - self.k if self.type == 'C' else self.k - price
+    def layer_evaluate(self,prices,Vu,Vd):
+        vals = (1/self.r_hat) * ((self.pi*Vu) + ((1-self.pi)*Vd))
         if self.style == 'A':
-            val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
-        else:
-            val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
-        return val
-
+            intrinsic_value = self.evaluate(prices)
+            vals = np.maximum(intrinsic_value, vals)
+        return vals
+        
     def create_list_tree(self):
         tree = [[0]]
         for period in range(self.n):
@@ -185,23 +185,51 @@ class BinomialOption(Option):
         for i in range(1,self.n+1):
             self.tree[i,0] = self.tree[i-1,0]*self.up
             self.tree[i,1:] = self.tree[i-1,:-1]*self.dn
+        self.tree.sort()
+
+    def create_trees(self):
+        self.s = np.array(self.s)
+        self.tree = np.zeros((len(self.s),self.n+1,self.n+1))
+        self.tree[:,0,0] = self.s
+        for i in range(1,self.n+1):
+            self.tree[:,i,0] = self.tree[:,i-1,0]*self.up
+            self.tree[:,i,1:] = self.tree[:,i-1,:-1]*self.dn
+        self.tree.sort()
     
     def create_value_tree(self):
         if not hasattr(self,'tree'):
             self.create_tree()
         
         self.value_tree = np.zeros_like(self.tree)
-        self.value_tree[0,:] = np.maximum(self.tree[-1,:]-100,0)[::-1]
-        self.value_tree[1,:-1] = (1/self.r_hat)*((self.pi*self.value_tree[0,1:])+(1-self.pi)*self.value_tree[0,:-1])
+        self.value_tree[0,:] = self.evaluate(self.tree[-1,:])
+        self.value_tree[1,:-1] = self.layer_evaluate(self.tree[-2,1:] ,self.value_tree[0,1:], self.value_tree[0,:-1])
         
         for i in range(2,self.value_tree.shape[0]):
-            self.value_tree[i,:-i] = (1/self.r_hat)*((self.pi*self.value_tree[i-1,1:-i+1])+(1-self.pi)*self.value_tree[i-1,:-i])
-
+            self.value_tree[i,:-i] = self.layer_evaluate(self.tree[-i-1,i:], self.value_tree[i-1,1:-i+1], self.value_tree[i-1,:-i])
         
+    def create_value_trees(self):
+        if not hasattr(self,'tree'):
+            self.create_trees()
+        
+        self.value_tree = np.zeros_like(self.tree)
+        self.value_tree[:,0,:] = self.evaluate(self.tree[:,-1,:])
+        # self.value_tree.sort(axis=2)
+        self.value_tree[:,1,:-1] = self.layer_evaluate(self.tree[:,-2,1:] ,self.value_tree[:,0,1:], self.value_tree[:,0,:-1])
+        
+        for i in range(2,self.value_tree.shape[1]):
+            self.value_tree[:,i,:-i] = self.layer_evaluate(self.tree[:,-i-1,i:] ,self.value_tree[:,i-1,1:-i+1], self.value_tree[:,i-1,:-i])
+
     def value(self, **kwargs):
         if kwargs:
             for key, val in kwargs.items():
                 self.__dict__[key] = val
+            if hasattr(self.s,'__iter__'):
+                self.get_secondary_params(trees=False)
+                self.create_trees()
+                self.create_value_trees()
+                result = self.value_tree[:,-1,0]
+                self.reset_params()
+                return self.qty*result
             self.get_secondary_params()
         
         elif not hasattr(self,'value_tree'):
@@ -212,7 +240,7 @@ class BinomialOption(Option):
         if kwargs:
             self.reset_params()
         
-        return result 
+        return self.qty*result 
 
     def price(self):
         return self.value()
@@ -225,6 +253,13 @@ class BinomialOption(Option):
         if kwargs:
             for key, val in kwargs.items():
                 self.__dict__[key] = val
+            if hasattr(self.s,'__iter__'):
+                self.create_trees()
+                self.create_value_trees()
+                layer = self.value_tree[:,-2]
+                result = (layer[:,1]-layer[:,0]) / (self.s*(self.up-self.dn))
+                self.reset_params()
+                return self.qty*result
             self.get_secondary_params()
         
         elif not hasattr(self,'value_tree'):
@@ -239,14 +274,21 @@ class BinomialOption(Option):
         return self.qty*result
 
     def gamma(self, **kwargs):
-        s = kwargs.get('s')
-        s_diff = 0
-        if s:
-            s_diff = self.s - s
+        s = self.s
+        if not kwargs.get('s') is None:
+            s = kwargs['s']
+        if hasattr(s,'__iter__'):
+            s = np.array(s)
+            shifts = np.sort(np.concatenate((s-1e-6,s+1e-6)))
+            kwargs['s'] = shifts
+            result = np.diff(self.delta(**kwargs).reshape(len(s),2),axis=1).flatten() / 2e-6
+            return result
 
-        result = self.deriv(lambda x: self.delta(s=x+s_diff), self.s+s_diff, dx=1e-6)
+        kwargs['s'] = np.array([s-1e-6,s+1e-6])
 
-        return self.qty*result
+        result = np.diff(self.delta(**kwargs)) / 2e-6
+
+        return self.qty*result[0]
 
     def vega(self, **kwargs):
         result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-6)
@@ -263,7 +305,7 @@ class BinomialOption(Option):
         
         return self.qty*result / 100
 
-    def plot(self,var='value',resolution=40, **kwargs):
+    def plot(self,var='value',resolution=25, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or  \'pnl\''''
         greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
         if kwargs:
@@ -276,11 +318,13 @@ class BinomialOption(Option):
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
 
-        if var == 'payoff':
-            vals = [self.value(s=x,t=1e-6) for x in spot]
+        if var == 'value' or var == 'delta' or var == 'gamma':
+            vals = getattr(self,var)(s=spot)
+        elif var == 'payoff':
+            vals = self.qty*self.evaluate(spot)
         elif var == 'pnl':
             cost = self.value()
-            vals = [self.value(s=x,t=1e-6) for x in spot] - cost
+            vals = self.qty*self.evaluate(spot) - cost
         else:
             vals = [getattr(self,var)(s=x) for x in spot]
 
@@ -297,7 +341,7 @@ class BinomialOption(Option):
 
 
     def plot_dist(self):
-        sn.kdeplot(np.concatenate(self.tree),fill=True)
+        sn.kdeplot(np.concatenate(self.create_list_tree()),fill=True)
 
     def show_tree(self):
         tree = self.create_list_tree()
@@ -313,19 +357,7 @@ class BinomialOption(Option):
         plt.show()
 
 class BinomialBarrierOption(BinomialOption):
-    '''Class for pricing barrier options with the Binomial Tree option pricing model
-    `s`: underlying price at T=0 (now)
-    `k`: strike price of the option
-    `t`: the time to expiration in years or a valid date
-    `sigma`: the volatility of the underlying
-    `r`: the risk-free rate
-    `barrier`: the barrier price
-    `barrier_type`: the type of barrier, \'KI\' for knock-in, \'KO\' for knock-out
-    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
-    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
-    `n`: the number of periods to use in the binomial tree
-    `qty`: the number of contracts (sign implies a long or short position)
-    '''
+    
     valid_barriers = {
         'ki':'KI',
         'ko':'KO',
@@ -334,19 +366,29 @@ class BinomialBarrierOption(BinomialOption):
     }
 
     def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.4, barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1):
-        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, n=n, type=type, style=style, qty=qty)
         self.barrier = barrier
         if barrier_type.lower() not in self.valid_barriers.keys():
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
         else:
             self.barrier_type = self.valid_barriers.get(barrier_type.lower())
+        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, n=n, type=type, style=style, qty=qty)
+        
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
         return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
 
+    def __neg__(self):
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n,qty=-self.qty, barrier=self.barrier, barrier_type=self.barrier_type)
+
+    def __mul__(self,amount: int):
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
+
+    def __rmul__(self,amount: int):
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
+
     def evaluate(self,price):
-        combos = {
+        conditions = {
             'C':{
                 'KI':price >= self.barrier,
                 'KO':price < self.barrier
@@ -355,37 +397,15 @@ class BinomialBarrierOption(BinomialOption):
                 'KI':price <= self.barrier,
                 'KO':price > self.barrier
             }
-            }
+        }
+        return (np.maximum(price-self.k,0) if self.type == 'C' else np.maximum(self.k-price,0)) * conditions[self.type][self.barrier_type]
 
-        val = max(price-self.k,0) if self.type == 'C' else max(self.k-price,0)
-        val *= combos[self.type][self.barrier_type]
-        
-
-        return val
-
-    def node_eval(self,price,Vu,Vd):
-        combos = {
-            'C':{
-                'KI':price >= self.barrier,
-                'KO':price < self.barrier
-            },
-            'P':{
-                'KI':price <= self.barrier,
-                'KO':price > self.barrier
-            }
-            }
-
-        intrinsic_value = price - self.k if self.type == 'C' else self.k - price
-        intrinsic_value *= combos[self.type][self.barrier_type]
-
-
-        
+    def layer_evaluate(self,prices,Vu,Vd):
+        vals = (1/self.r_hat) * ((self.pi*Vu) + ((1-self.pi)*Vd))
         if self.style == 'A':
-            val = max(intrinsic_value, (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd)))
-        else:
-            val = (1/self.r_hat) * ((self.pi*Vu)+((1-self.pi)*Vd))
-        
-        return val    
+            intrinsic_value = self.evaluate(prices)
+            vals = np.maximum(intrinsic_value, vals)
+        return vals 
 
 class BSOption(Option):
     '''Implementation of the Black-Scholes option pricing model
@@ -640,7 +660,7 @@ class BSOption(Option):
         if var == 'summary':
             var = ['value','delta','gamma','vega','theta','rho']
 
-        if isinstance(var, (list, tuple, np.ndarray)) and all([i in greeks for i in var]):
+        if hasattr(var,'__iter__') and all([i in greeks for i in var]):
             var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
             facet_map = {
                             2:(2,1),
@@ -876,7 +896,7 @@ class MCOption(Option):
                 self.__dict__[key] = val
             self.M = int(self.M)
 
-        if isinstance(self.s,(list,tuple,np.ndarray)):
+        if hasattr(self.s,'__iter__'):
             x = kwargs.pop('s')
             result = np.array([self.value(s=spot, **kwargs) for spot in x])
             if kwargs:
@@ -998,24 +1018,7 @@ class MCOption(Option):
             plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
             plt.show()
    
-class BarrierOption(MCOption, BinomialOption):
-    '''Class for pricing barrier options with the Monte-Carlo or Binomial Tree option pricing models
-    `s`: underlying price at T=0 (now)
-    `k`: strike price of the option
-    `t`: the time to expiration in years or a valid date
-    `sigma`: the volatility of the underlying
-    `r`: the risk-free rate
-    `barrier`: the barrier price
-    `barrier_type`: the type of barrier, \'KI\' for knock-in, \'KO\' for knock-out
-    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
-    `method`: either \'MC\' or \'Binomial\' for Monte-Carlo or Binomial Tree
-    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
-    `qty`: the number of contracts (sign implies a long or short position)
-    `n`: the number of periods to use in the binomial tree
-    `N`: the number of periods to simulate in the Monte-Carlo method
-    `M`: the number of simulations to run in the Monte-Carlo method
-    `control`: either \'antithetic\' or \'delta\' or None for the control variates of the Monte-Carlo method
-    '''
+class MCBarrierOption(MCOption):
 
     valid_barriers = {
         'ki':'KI',
@@ -1032,9 +1035,9 @@ class BarrierOption(MCOption, BinomialOption):
             self.M = int(kwargs.get('M')) or int(self.M)
             self.N = int(kwargs.get('N')) or int(self.N)
             super(MCOption,self).__init__()
-        else:
-            super(BinomialOption,self).__init__()
-            self.n = int(kwargs.get('n')) or int(self.n)
+        # else:
+        #     super(BinomialOption,self).__init__()
+        #     self.n = int(kwargs.get('n')) or int(self.n)
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -1064,13 +1067,13 @@ class BarrierOption(MCOption, BinomialOption):
         return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, method={self.method})'
 
     def __neg__(self):
-        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=-self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+        return MCBarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=-self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
     
     def __mul__(self,amount):
-        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+        return MCBarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
     
     def __rmul__(self,amount):
-        return BarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
+        return MCBarrierOption(s=self.s, k=self.k, t=self.t, sigma=self.sigma, r=self.r, type=self.type, qty=amount*self.qty, method=self.method, barrier=self.barrier, barrier_type=self.barrier_type,**self.kwargs)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -1079,7 +1082,7 @@ class BarrierOption(MCOption, BinomialOption):
         return OptionPortfolio(self,-other)
 
     def evaluate(self,st,k,cv_d=None):
-        combos = {
+        conditions = {
                     'C':{
                         'KI':st >= self.barrier,
                         'KO':st < self.barrier
@@ -1229,6 +1232,9 @@ class OptionPortfolio:
         output = f'OptionPortfolio(\n{os}\n)'
         return output
 
+    def __neg__(self):
+        return OptionPortfolio(*[-o for o in self.options])
+
     def __add__(self,other):
         return OptionPortfolio(*(list(self.options) + [other]))
 
@@ -1326,9 +1332,22 @@ class OptionPortfolio:
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='pnl', interactive=False, resolution=40, return_ax=False, xrange=0.3):
+    def plot(self,var='pnl', interactive=False, resolution=40, xrange=0.3, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
         greeks = {'value','delta','gamma','speed','vega','vanna','rho','theta','pnl','payoff','summary'}
+
+        x = kwargs.get('x')
+        y = kwargs.get('y')
+        if x and y:
+            xs = np.linspace(0, 2*getattr(self,x), resolution)
+            ys = getattr(self,y)(**{x:xs})
+            fig, ax = plt.subplots()
+            ax.plot(xs,ys)
+            ax.set_xlabel(x)
+            if x == 't':
+                ax.invert_xaxis()
+            ax.set_ylabel(y)
+            return ax
 
         if isinstance(var,str) and var not in greeks: 
             raise ValueError('`var` must be either value, delta, gamma, speed, vega, vanna, theta, rho, payoff, pnl, or summary')
@@ -1339,7 +1358,7 @@ class OptionPortfolio:
         if var == 'summary':
             var = ['value','delta','gamma','vega','theta','rho']
 
-        if isinstance(var, (list, tuple, np.ndarray)) and all([i in greeks for i in var]):
+        if hasattr(var,'__iter__') and all([i in greeks for i in var]):
             var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
             facet_map = {
                             2:(2,1),
@@ -1380,10 +1399,8 @@ class OptionPortfolio:
             for k in self.ks:
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
 
-            if return_ax:
-                return plt.gca()
-            else:
-                plt.show()
+            plt.show()
+            
         elif interactive and isinstance(var,str):
             def f(t=2):
                 fig, ax = plt.subplots(figsize=(8,4.9))
@@ -1464,7 +1481,65 @@ class DigitalOption(OptionPortfolio):
     def __rmul__(self,amount):
         return DigitalOption(s=self.s,k=self.k,t=self.t,sigma=self.sigma,r=self.r,type=self.type,qty=self.qty*amount)
 
-    
+class BSBarrierOption(OptionPortfolio):
+
+    def __init__(self, s, k, t, sigma, r, type, barrier, barrier_type='KI'):
+        spread = abs(barrier - k)
+        coeff = 1 if barrier_type == 'KI' else -1
+        self.components = [
+            BSOption(s, barrier, t, sigma, r, type, qty=1),
+            DigitalOption(s, barrier, t, sigma, r, type)*(spread*coeff)
+            ]
+        if barrier_type == 'KO':
+            self.components[0] = BSOption(s, k, t, sigma, r, type, qty=1)
+            self.components.append(BSOption(s, barrier, t, sigma, r, type, qty=-1))
+        super().__init__(*self.components)
+        self.ks.append(k)
+
+class BarrierOption:
+    '''
+    #### Class for pricing barrier options with the Binomial Tree, Black-Scholes, or Monte-Carlo option pricing methods
+    Arguments:
+    `method`: the method to use for pricing the option, either \'binomial\', \'bs\', or \'mc\'
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `barrier`: the barrier price
+    `barrier_type`: the type of barrier, \'KI\' for knock-in, \'KO\' for knock-out
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
+    `qty`: the number of contracts (sign implies a long or short position)
+
+    Subclass specific parameters:
+    Binomial Tree:
+        `n`: the number of periods to use in the binomial tree
+    Monte-Carlo:
+        `N`: the number of steps to use in the Monte-Carlo simulation
+        `M`: the number of simulations to run
+        `control`: which types of control variates to apply, e.g. \'antithetic\'
+    Black-Scholes:
+
+    '''
+    valid_methods = {
+        'binomial':'binomial',
+        'bs':'bs',
+        'black-scholes':'bs',
+        'blackscholes':'bs',
+        'mc':'mc',
+        'monte-carlo':'mc',
+        'montecarlo':'mc'
+    }
+
+    def __new__(cls, *args, **kwargs):
+        method = cls.valid_methods.get(kwargs.pop('method').replace(' ','').lower())
+        if method == 'mc':
+            return MCBarrierOption(*args, **kwargs)
+        elif method == 'bs':
+            return BSBarrierOption(*args, **kwargs)
+        else:
+            return BinomialBarrierOption(*args, **kwargs)
 
 class VolSurface:
     '''Object that retrieves the volatility surface from the market for a given underlying
@@ -1632,7 +1707,19 @@ class GEX:
         plt.show()
 
 if __name__=='__main__':
-    digi = DigitalOption(100,80,'01-20-2023',0.3,0.04,type='C')
-    ki_put = BarrierOption(100,100,'01-20-2023',0.3,0.04,type='P',barrier=80,barrier_type='KI',method='MC',control='antithetic',N=1,M=1e5)
-    phoenix = (digi*10 - ki_put)
+    digi = DigitalOption(100,100,'01-20-2023',0.3,0.04,type='C')
+    # digis = OptionPortfolio
+    ki_put = BarrierOption(
+        s=100,
+        k=100,
+        t='01-20-2023',
+        sigma=0.3,
+        r=0.04,
+        type='P',
+        barrier=80,
+        barrier_type='KI',
+        method='binomial',
+        n=200
+        )
+    phoenix = ki_put - 10*digi
     phoenix.plot()
